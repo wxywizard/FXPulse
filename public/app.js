@@ -17,6 +17,17 @@ const initial = JSON.parse(document.querySelector("#fxpulse-data").textContent);
 const OVERVIEW_GLOBAL_STORAGE_KEY = "fxpulse.overview.global-sources.v1";
 const OVERVIEW_CARD_STORAGE_KEY = "fxpulse.overview.card-sources.v1";
 const HISTORY_API_VERSION = "coverage-v2";
+const FIXED_CHART_SOURCE_IDS = ["market", "wise"];
+const MAX_CHART_EXTRA_SOURCES = 5;
+const CHART_SOURCE_COLORS = [
+  "#2fe3a0",
+  "#339cff",
+  "#ff4d57",
+  "#ffc247",
+  "#9d6cff",
+  "#ff6bcb",
+  "#ff7a2f",
+];
 const SOURCE_CATALOG = Array.isArray(initial.sourceCatalog) ? initial.sourceCatalog : [];
 const state = {
   base: initial.base,
@@ -31,7 +42,7 @@ const state = {
   overviewCardSources: readCardOverviewSources(),
   calculatorSource: "market",
   chartType: "line",
-  chartSources: new Set(["market"]),
+  chartSources: new Set(FIXED_CHART_SOURCE_IDS),
   history: null,
   historyController: null,
   comparisonController: null,
@@ -210,12 +221,25 @@ function bindEvents() {
   elements.chartSourcePicker.addEventListener("change", (event) => {
     const input = event.target.closest("[data-history-source]");
     if (!input) return;
-    if (input.checked) state.chartSources.add(input.value);
-    else state.chartSources.delete(input.value);
-    if (state.chartSources.size === 0) {
+
+    if (FIXED_CHART_SOURCE_IDS.includes(input.value)) {
       input.checked = true;
-      state.chartSources.add(input.value);
+      state.chartSources = new Set(normalizeChartSourceIds(state.chartSources));
+      updateChartSelectionNote();
+      return;
     }
+
+    const nextSources = new Set(state.chartSources);
+    if (input.checked) nextSources.add(input.value);
+    else nextSources.delete(input.value);
+    const normalized = normalizeChartSourceIds(nextSources);
+    if (input.checked && !normalized.includes(input.value)) {
+      input.checked = false;
+      elements.chartSelectionNote.textContent = "公共市场与 Wise 固定保留；其余最多只能选择 5 个数据源。";
+      return;
+    }
+
+    state.chartSources = new Set(normalized);
     updateChartSelectionNote();
     loadHistory();
   });
@@ -511,6 +535,14 @@ function normalizeOverviewSourceIds(values) {
   return [...new Set(Array.isArray(values) ? values : [])]
     .filter((id) => supported.has(id))
     .slice(0, 5);
+}
+
+function normalizeChartSourceIds(values) {
+  const unique = [...new Set(values ?? [])];
+  const extras = unique
+    .filter((id) => !FIXED_CHART_SOURCE_IDS.includes(id))
+    .slice(0, MAX_CHART_EXTRA_SOURCES);
+  return [...FIXED_CHART_SOURCE_IDS, ...extras];
 }
 
 function readGlobalOverviewSources() {
@@ -844,7 +876,7 @@ function renderLineSeries(seriesList, x, y) {
 }
 
 function renderBarSeries(seriesList, barDays, x, y, height, padding, width) {
-  const baseWidth = Math.max(1.5, Math.min(22, ((width - padding.left - padding.right) / Math.max(1, barDays.length)) * 0.68));
+  const baseWidth = Math.max(1.5, Math.min(22, ((width - padding.left - padding.right) / Math.max(1, barDays.length)) * 0.72));
   const bottom = height - padding.bottom;
   const pointsBySourceAndDay = seriesList.map((series) => new Map(
     series.points.map((point) => [point.timestamp, point]),
@@ -854,7 +886,8 @@ function renderBarSeries(seriesList, barDays, x, y, height, padding, width) {
       const point = pointsBySourceAndDay[index].get(timestamp);
       if (!point) return "";
       const color = sourceColor(series.id, index);
-      const barWidth = Math.max(1.2, baseWidth * (1 - (index / Math.max(6, seriesList.length)) * 0.35));
+      const layerProgress = index / Math.max(1, seriesList.length - 1);
+      const barWidth = Math.max(1.2, baseWidth * (1 - layerProgress * 0.48));
       const top = y(point.rate);
       return `<rect class="chart-bar" data-source="${escapeHtml(series.id)}" x="${(x(timestamp) - barWidth / 2).toFixed(2)}" y="${top.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(1, bottom - top).toFixed(2)}" rx="${Math.min(2, barWidth / 3).toFixed(2)}" style="fill:${color}"><title>${escapeHtml(series.label)} · ${formatRate(point.rate, state.quote)} ${state.quote}</title></rect>`;
     }).join("");
@@ -930,11 +963,14 @@ function nearestPoint(points, timestamp) {
 }
 
 function sourceColor(id, index = 0) {
-  const core = { market: "#57efb3", wise: "#76c8ff", hsbc_public: "#ff9690" };
+  const core = { market: CHART_SOURCE_COLORS[0], wise: CHART_SOURCE_COLORS[1] };
   if (core[id]) return core[id];
+  if (Number.isInteger(index) && index > 0) {
+    return CHART_SOURCE_COLORS[index % CHART_SOURCE_COLORS.length];
+  }
   let hash = 0;
   for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) % 360;
-  return `hsl(${(hash + index * 17) % 360} 72% 64%)`;
+  return `hsl(${hash} 78% 58%)`;
 }
 
 function renderChartLegend(available, unavailable) {
@@ -1035,9 +1071,9 @@ function refreshCalculatorSources() {
 }
 
 function updateChartSelectionNote() {
-  const bankCount = [...state.chartSources].filter((id) => id.startsWith("bank_")).length;
-  setText("#chart-bank-count", String(bankCount));
-  elements.chartSelectionNote.textContent = `已选择 ${state.chartSources.size} 个数据源。折线图可同时比较；柱状图按香港日期共用一个柱位，并以半透明颜色叠层区分，汇率数值不会相加。`;
+  const extras = [...state.chartSources].filter((id) => !FIXED_CHART_SOURCE_IDS.includes(id));
+  setText("#chart-bank-count", `${extras.length} / ${MAX_CHART_EXTRA_SOURCES}`);
+  elements.chartSelectionNote.textContent = `公共市场与 Wise 固定保留；已增加 ${extras.length} / ${MAX_CHART_EXTRA_SOURCES} 个数据源。折线图可同时比较；柱状图按香港日期共用一个柱位，以高对比颜色叠层区分，汇率数值不会相加。`;
 }
 
 function updateBaseChrome() {

@@ -137,4 +137,4 @@ curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=ma
 - 反转页面、计算器、统一来源表、走势图和 canonical URL 同步切换。
 - `/api/overview` 始终返回公共市场与 Wise，并只加载 `sources` 指定的额外来源；前端对全局配置和每张卡片分别执行最多 5 个限制。多个单卡配置合并请求时可形成超过 5 个的去重来源集合，未请求的银行不为总览重复采集。
 - 银行接口返回 18 行，`availableBankCount` 与各行 `status` 一致；汇丰行为 `HSBC Hong Kong` 官方直连，其余行为 `YoYoRate` 公开聚合。
-- 历史接口按 `sources` 返回多个序列；银行数据不足时返回 `unavailable` 和原因，不借用公共市场数据。
+- 历史接口固定返回公共市场与 Wise，并按 `sources` 接受最多 5 个额外来源；银行数据不足时返回 `unavailable` 和原因，不借用公共市场数据。

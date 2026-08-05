@@ -8,7 +8,7 @@ import {
 import type { CurrentSnapshot } from "./rates";
 import { HONG_KONG_BANKS } from "./bank-rates";
 
-const ASSET_VERSION = "20260805-chart-history-v1";
+const ASSET_VERSION = "20260805-chart-source-limit-v1";
 
 interface PageOptions {
   origin: string;
@@ -228,19 +228,19 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
           </div>
         </div>
         <div id="chart-source-picker" class="chart-source-picker">
-          <span class="chart-source-title">历史数据源（可多选）</span>
+          <span class="chart-source-title">历史数据源（固定 2 + 最多 5 个）</span>
           <div class="chart-core-sources">
-            ${historySourceCheckbox("market", "公共市场", true)}
-            ${historySourceCheckbox("wise", "Wise 中间价")}
-            ${historySourceCheckbox("hsbc_public", "汇丰公开 TT")}
+            ${historySourceCheckbox("market", "公共市场", true, true)}
+            ${historySourceCheckbox("wise", "Wise 中间价", true, true)}
           </div>
           <details class="chart-bank-picker">
-            <summary>其他香港银行 <b id="chart-bank-count">0</b> / ${HONG_KONG_BANKS.length - 1}</summary>
+            <summary>附加数据源 <b id="chart-bank-count">0 / 5</b></summary>
             <div class="chart-bank-options">
+              ${historySourceCheckbox("hsbc_public", "汇丰公开 TT")}
               ${HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc").map((bank) => historySourceCheckbox(`bank_${bank.id}`, bank.name)).join("")}
             </div>
           </details>
-          <p id="chart-selection-note">已选择 1 个数据源。柱状图按香港日期共用一个柱位并以颜色叠层区分；银行历史不足时会明确标注。</p>
+          <p id="chart-selection-note">公共市场与 Wise 固定保留；其余接入来源最多选择 5 个。柱状图按香港日期共用一个柱位并以高对比颜色叠层区分；银行历史不足时会明确标注。</p>
         </div>
         <div id="chart-legend" class="chart-legend" aria-live="polite"></div>
         <div id="chart-wrap" class="chart-wrap" aria-live="polite">
@@ -413,8 +413,13 @@ function renderCardSourceConfig(code: CurrencyCode): string {
   </details>`;
 }
 
-function historySourceCheckbox(id: string, label: string, checked = false): string {
-  return `<label class="chart-source-option"><input type="checkbox" value="${id}" data-history-source ${checked ? "checked" : ""}><span><i></i>${label}</span></label>`;
+function historySourceCheckbox(
+  id: string,
+  label: string,
+  checked = false,
+  fixed = false,
+): string {
+  return `<label class="chart-source-option"><input type="checkbox" value="${id}" data-history-source ${checked ? "checked" : ""} ${fixed ? "disabled data-history-fixed" : ""}><span><i></i>${label}</span></label>`;
 }
 
 function renderStructuredData(input: {

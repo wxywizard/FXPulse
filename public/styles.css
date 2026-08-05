@@ -331,6 +331,8 @@ button { color: inherit; }
 .chart-source-option > span i { width: 8px; height: 8px; border: 2px solid var(--muted-2); border-radius: 50%; }
 .chart-source-option input:checked + span { border-color: var(--line-strong); color: var(--text); background: rgba(77, 234, 174, .1); }
 .chart-source-option input:checked + span i { border-color: var(--green-bright); background: var(--green); box-shadow: 0 0 9px rgba(77, 234, 174, .42); }
+.chart-source-option input:disabled + span { cursor: default; opacity: 1; }
+.chart-source-option input:disabled + span::after { content: "固定"; margin-left: 2px; color: var(--muted); font: 650 10px var(--mono); letter-spacing: .04em; }
 .chart-source-option input:focus-visible + span { outline: 2px solid var(--green-bright); outline-offset: 2px; }
 .chart-bank-picker { position: relative; justify-self: end; }
 .chart-bank-picker summary { min-height: 36px; display: flex; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--text); background: rgba(20, 65, 49, .92); font-size: 12px; font-weight: 680; cursor: pointer; list-style: none; }
@@ -354,7 +356,7 @@ button { color: inherit; }
 .chart-line-glow { fill: none; stroke-width: 9; stroke-opacity: .13; vector-effect: non-scaling-stroke; filter: blur(4px); }
 .chart-line { fill: none; stroke-width: 2.25; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .chart-point { fill: var(--bg); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
-.chart-bar { fill-opacity: .5; stroke: rgba(255, 255, 255, .16); stroke-width: .45; vector-effect: non-scaling-stroke; mix-blend-mode: screen; }
+.chart-bar { fill-opacity: .78; stroke: rgba(3, 18, 13, .9); stroke-width: 1; vector-effect: non-scaling-stroke; mix-blend-mode: normal; }
 .chart-cursor { stroke: rgba(120, 255, 194, .35); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
 .chart-hit { cursor: crosshair; }
 .chart-tooltip { position: absolute; width: 210px; transform: translateX(-50%); padding: 11px 12px; border: 1px solid rgba(95, 237, 179, .32); border-radius: 11px; background: rgba(2, 17, 12, .97); box-shadow: 0 16px 35px rgba(0,0,0,.35); pointer-events: none; }

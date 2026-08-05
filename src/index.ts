@@ -618,18 +618,9 @@ export async function handleHistory(url: URL, env: Env): Promise<Response> {
   const quote = normalizeCurrency(rawQuote);
   if (base === quote) return json({ error: "Base and quote must be different" }, 400);
 
-  const requestedSourceIds = [
-    ...new Set(
-      (url.searchParams.get("sources") ?? "market")
-        .split(",")
-        .map((source) => source.trim())
-        .filter(Boolean),
-    ),
-  ];
+  const requestedSourceIds = parseHistorySourceIds(url);
+  if (requestedSourceIds instanceof Response) return requestedSourceIds;
   const sourceMetadata = requestedSourceIds.map(historySourceMetadata);
-  if (sourceMetadata.some((source) => source === null)) {
-    return json({ error: "Unsupported history source" }, 400);
-  }
 
   try {
     const series = await Promise.all(
@@ -842,6 +833,24 @@ export function parseOverviewSourceIds(url: URL): string[] | Response {
     }
   }
   return ids;
+}
+
+export function parseHistorySourceIds(url: URL): string[] | Response {
+  const fixedSourceIds = ["market", "wise"];
+  const requestedIds = [
+    ...new Set(
+      (url.searchParams.get("sources") ?? "")
+        .split(",")
+        .map((source) => source.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const extras = requestedIds.filter((id) => !fixedSourceIds.includes(id));
+  if (extras.length > 5) return json({ error: "Too many history sources" }, 400);
+  if (requestedIds.some((id) => historySourceMetadata(id) === null)) {
+    return json({ error: "Unsupported history source" }, 400);
+  }
+  return [...fixedSourceIds, ...extras];
 }
 
 async function safeReadProviderQuote(

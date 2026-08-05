@@ -124,6 +124,8 @@ curl "https://fxpulse.177.best/api/overview?base=AUD&sources=hsbc_public,bank_bo
 curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=market,wise,hsbc_public,bank_boc"
 ```
 
+响应应固定包含 `market` 与 `wise`；除这两项外最多接受 5 个来源，第 6 个额外来源应返回 `400 Too many history sources`。
+
 公共市场应返回可用序列；Wise、汇丰或银行归档不足时应返回带原因的 `unavailable`，不得复制公共市场点位。
 
 页面验收地址：

@@ -25,6 +25,7 @@ import {
   coversRequestedHistoryWindow,
   handleHistory,
   handleOverview,
+  parseHistorySourceIds,
   parseOverviewSourceIds,
 } from "../src/index";
 
@@ -148,6 +149,47 @@ describe("overview source validation", () => {
 });
 
 describe("layered bar chart dates", () => {
+  it("pins market and Wise while limiting all other chart sources to five", async () => {
+    const fiveExtras = ["hsbc_public", ...HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc").slice(0, 4).map((bank) => `bank_${bank.id}`)];
+    expect(
+      parseHistorySourceIds(
+        new URL(`https://fxpulse.example/api/history?sources=${fiveExtras.join(",")}`),
+      ),
+    ).toEqual(["market", "wise", ...fiveExtras]);
+
+    const sixExtras = [...fiveExtras, `bank_${HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc")[4]?.id}`];
+    const response = parseHistorySourceIds(
+      new URL(`https://fxpulse.example/api/history?sources=${sixExtras.join(",")}`),
+    );
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(400);
+    expect(await (response as Response).json()).toEqual({ error: "Too many history sources" });
+  });
+
+  it("normalizes the browser selection to the two fixed sources plus five extras", () => {
+    const helperStart = appScript.indexOf("function normalizeChartSourceIds");
+    const helperEnd = appScript.indexOf("function readGlobalOverviewSources", helperStart);
+    const normalizeChartSourceIds = new Function(
+      "FIXED_CHART_SOURCE_IDS",
+      "MAX_CHART_EXTRA_SOURCES",
+      `${appScript.slice(helperStart, helperEnd)}; return normalizeChartSourceIds;`,
+    )(["market", "wise"], 5) as (values: Iterable<string>) => string[];
+    const extras = ["hsbc_public", "bank_boc", "bank_bea", "bank_dbs", "bank_hangseng", "bank_icbc"];
+
+    expect(normalizeChartSourceIds(new Set(["wise", ...extras, "market"]))).toEqual([
+      "market",
+      "wise",
+      ...extras.slice(0, 5),
+    ]);
+  });
+
+  it("uses a saturated seven-color chart palette and opaque nested bars", () => {
+    expect(appScript).toContain('const FIXED_CHART_SOURCE_IDS = ["market", "wise"]');
+    expect(appScript).toContain("const MAX_CHART_EXTRA_SOURCES = 5");
+    expect(appScript).toContain('"#ff4d57"');
+    expect(appScript).toContain("layerProgress * 0.48");
+  });
+
   it("switches to the bar renderer when the bar button is clicked", () => {
     const helperStart = appScript.indexOf("function bindChartTypeSwitcher");
     const helperEnd = appScript.indexOf("async function swapPair", helperStart);
@@ -621,7 +663,9 @@ describe("search surfaces", () => {
     expect(html).toContain('data-chart-type="line"');
     expect(html).toContain('data-chart-type="bar"');
     expect(html.match(/data-history-source/g)).toHaveLength(20);
-    expect(html).toContain("历史数据源（可多选）");
+    expect(html).toContain("历史数据源（固定 2 + 最多 5 个）");
+    expect(html.match(/data-history-fixed/g)).toHaveLength(2);
+    expect(html).toContain('id="chart-bank-count">0 / 5');
     expect(html).toContain("本站数据须经书面授权方可使用");
     expect(html).toContain("未经授权使用将被视为侵权");
     expect(html).not.toContain("并提供指向本项目公开仓库的可点击链接");
