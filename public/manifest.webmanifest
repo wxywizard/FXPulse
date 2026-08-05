@@ -1,0 +1,12 @@
+{
+  "name": "FXPulse",
+  "short_name": "FXPulse",
+  "description": "11 种主要币种的市场参考汇率与历史趋势",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#06130f",
+  "theme_color": "#071a16",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

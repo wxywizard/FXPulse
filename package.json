@@ -1,0 +1,29 @@
+{
+  "name": "fxpulse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FXPulse — HSBC Hong Kong Deposit Plus currency reference rates and trends.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "npm run build && vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "db:migrate:local": "wrangler d1 migrations apply fxpulse-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply fxpulse-db --remote",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260804.1",
+    "@cloudflare/vite-plugin": "1.50.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.0",
+    "vitest": "4.1.10",
+    "wrangler": "4.118.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
