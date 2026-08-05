@@ -1,6 +1,7 @@
 import { CURRENCY_CODES, type CurrencyCode } from "./currencies";
 
 const YOYO_RATE_BASE_URL = "https://yoyorate.com/compare/hk/hkd-to-";
+const UPSTREAM_TIMEOUT_MS = 5_000;
 const ALL_SUPPORTED_CURRENCIES = CURRENCY_CODES;
 const ALL_BANK_CURRENCIES = CURRENCY_CODES.filter(
   (currency): currency is Exclude<CurrencyCode, "HKD"> => currency !== "HKD",
@@ -114,6 +115,7 @@ export async function fetchHongKongBankLegs(
       "accept-language": "zh-HK,zh;q=0.9,en;q=0.7",
     },
     cf: { cacheEverything: true, cacheTtl: 300 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Hong Kong bank rate source returned ${response.status}`);
   const rows = parseYoYoRateTtPage(await response.text(), currency);

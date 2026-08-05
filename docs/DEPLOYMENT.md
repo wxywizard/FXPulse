@@ -1,6 +1,6 @@
 # FXPulse Cloudflare 部署指南
 
-版本：v1.2<br>
+版本：v1.3<br>
 更新时间：2026-08-05
 
 ## 1. 生产配置
@@ -11,7 +11,7 @@
 | D1 Binding | `DB` |
 | D1 Database | `fxpulse-db` |
 | Static Assets Binding | `ASSETS` |
-| Cron | `*/15 * * * *` |
+| Cron | `0 * * * *` |
 | Production branch | `main` |
 | 自定义域名 | `fxpulse.177.best` |
 
@@ -62,7 +62,7 @@ WHERE type = 'table'
 ORDER BY name;
 ```
 
-应看到两张表。`provider_rate_snapshots` 用于 Wise、汇丰及用户访问过的香港银行币种对归档；即使该表暂时不可用，页面仍会读取实时接口，但没有相应来源的历史与故障降级能力。
+应看到两张表。`provider_rate_snapshots` 仅由 Cron 写入，用于 Wise、汇丰及香港银行币种对归档；即使该表暂时不可用，页面仍会读取实时接口，但没有相应来源的历史与故障降级能力。
 
 ## 4. 上线验收
 
@@ -124,7 +124,7 @@ curl "https://fxpulse.177.best/api/overview?base=AUD&sources=hsbc_public,bank_bo
 curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=market,wise,hsbc_public,bank_boc"
 ```
 
-响应应固定包含 `market` 与 `wise`；除这两项外最多接受 5 个来源，第 6 个额外来源应返回 `400 Too many history sources`。
+响应应固定包含 `market` 与 `wise`；除这两项外最多接受 5 个来源，第 6 个额外来源应返回 `400 Too many history sources`。响应头 `x-fxpulse-cache` 应依次可观察到 `MISS`、`HIT`，过期缓存可返回 `STALE`。
 
 公共市场应返回可用序列；Wise、汇丰或银行归档不足时应返回带原因的 `unavailable`，不得复制公共市场点位。
 
@@ -135,7 +135,7 @@ curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=ma
 
 ## 5. Cron 验证
 
-部署 15 分钟后在 D1 Console 执行：
+部署 1 小时后在 D1 Console 执行；银行归档需等到下一个 UTC 00:00、08:00 或 16:00：
 
 ```sql
 SELECT provider,
@@ -148,10 +148,11 @@ ORDER BY provider;
 
 预期：
 
-- `hsbc_public` 每 15 分钟最多写入 110 个有向币种对；
+- `hsbc_public` 每小时最多写入 110 个有向币种对；
 - `wise` 每小时最多写入 20 个 USD 双向币种对；
-- `bank_*` 每小时从 10 个银行币种页推导并分批写入全部可用方向；页面访问相应币种对时也按小时桶补充；
-- 早于 400 天的数据由 Cron 清理。
+- `bank_*` 每 8 小时从 10 个银行币种页推导并分批写入全部可用方向；
+- 页面访问不会增加 `provider_rate_snapshots` 行数；
+- 盘中点保留 30 天并生成日均点，日均点保留 400 天；每日清理最多 12,000 行。
 
 ## 6. 故障判断
 

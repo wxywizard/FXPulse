@@ -3,6 +3,12 @@ import { CURRENCY_CODES, type CurrencyCode } from "./currencies";
 const WISE_PUBLIC_RATES_ENDPOINT = "https://wise.com/rates/live";
 const HSBC_PUBLIC_RATES_ENDPOINT =
   "https://rbwm-api.hsbc.com.hk/digital-pws-tools-investments-eapi-prod-proxy/v1/investments/exchange-rate";
+const UPSTREAM_TIMEOUT_MS = 5_000;
+const DAY_SECONDS = 86_400;
+const DAILY_MARKER_SECONDS = 12 * 3_600 + 1;
+const INTRADAY_RETENTION_DAYS = 30;
+const DAILY_RETENTION_DAYS = 400;
+const MAX_DAILY_CLEANUP_ROWS = 12_000;
 
 export type ProviderId = "wise" | "hsbc_public";
 export type ArchivedProviderId = ProviderId | `bank_${string}`;
@@ -64,6 +70,7 @@ export async function fetchWisePair(
   const response = await fetcher(`${WISE_PUBLIC_RATES_ENDPOINT}?${query.toString()}`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 60 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
 
   if (!response.ok) throw new Error(`Wise public rate provider returned ${response.status}`);
@@ -98,6 +105,7 @@ export async function fetchHsbcPublicPair(
   const response = await fetcher(`${HSBC_PUBLIC_RATES_ENDPOINT}?locale=zh_HK`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 300 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`HSBC public rate provider returned ${response.status}`);
   const payload = (await response.json()) as HsbcPublicRateResponse;
@@ -163,6 +171,7 @@ export async function collectHsbcPublicQuotes(
   const response = await fetcher(`${HSBC_PUBLIC_RATES_ENDPOINT}?locale=zh_HK`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 300 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`HSBC public rate provider returned ${response.status}`);
   const payload = (await response.json()) as HsbcPublicRateResponse;
@@ -171,29 +180,6 @@ export async function collectHsbcPublicQuotes(
       deriveHsbcPublicPair(payload, base, quote),
     ),
   );
-}
-
-export async function storeProviderQuote(
-  db: D1Database,
-  quote: ProviderRateQuote,
-): Promise<void> {
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO provider_rate_snapshots
-        (provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
-    )
-    .bind(
-      quote.provider,
-      quote.base,
-      quote.quote,
-      quote.rate,
-      quote.rateType,
-      quote.observedAt,
-      quote.sourceUpdatedAt,
-      JSON.stringify(quote.metadata),
-    )
-    .run();
 }
 
 export async function storeProviderQuotes(
@@ -223,6 +209,63 @@ export async function storeProviderQuotes(
     );
     await db.batch(statements);
   }
+}
+
+export function bucketProviderQuotes(
+  quotes: ProviderRateQuote[],
+  observedAt: number,
+): ProviderRateQuote[] {
+  return quotes.map((quote) => ({ ...quote, observedAt }));
+}
+
+export async function compactProviderHistory(
+  db: D1Database,
+  nowEpoch = Math.floor(Date.now() / 1000),
+): Promise<void> {
+  const todayStart = Math.floor(nowEpoch / DAY_SECONDS) * DAY_SECONDS;
+  const previousDayStart = todayStart - DAY_SECONDS;
+  const dailyObservedAt = previousDayStart + DAILY_MARKER_SECONDS;
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO provider_rate_snapshots
+        (provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json)
+       SELECT provider,
+              base,
+              quote,
+              AVG(rate),
+              rate_type,
+              ?3,
+              MAX(source_updated_at),
+              '{"aggregation":"daily_average"}'
+       FROM provider_rate_snapshots
+       WHERE observed_at >= ?1
+         AND observed_at < ?2
+         AND (observed_at % ${DAY_SECONDS}) != ${DAILY_MARKER_SECONDS}
+       GROUP BY provider, base, quote, rate_type`,
+    )
+    .bind(previousDayStart, todayStart, dailyObservedAt)
+    .run();
+
+  const intradayCutoff = todayStart - INTRADAY_RETENTION_DAYS * DAY_SECONDS;
+  const dailyCutoff = todayStart - DAILY_RETENTION_DAYS * DAY_SECONDS;
+  await db
+    .prepare(
+      `DELETE FROM provider_rate_snapshots
+       WHERE rowid IN (
+         SELECT rowid
+         FROM provider_rate_snapshots
+         WHERE observed_at < ?1
+            OR (
+              observed_at < ?2
+              AND (observed_at % ${DAY_SECONDS}) != ${DAILY_MARKER_SECONDS}
+            )
+         ORDER BY observed_at ASC
+         LIMIT ${MAX_DAILY_CLEANUP_ROWS}
+       )`,
+    )
+    .bind(dailyCutoff, intradayCutoff)
+    .run();
 }
 
 export async function readLatestProviderQuote(

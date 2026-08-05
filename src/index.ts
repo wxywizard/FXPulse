@@ -8,20 +8,22 @@ import {
   type CurrencyCode,
 } from "./currencies";
 import {
+  cleanupMarketHistory,
   fetchCurrentSnapshot,
   fetchReferenceHistory,
   readD1History,
   storeSnapshot,
 } from "./rates";
 import {
+  bucketProviderQuotes,
   collectHsbcPublicQuotes,
   collectWiseUsdQuotes,
+  compactProviderHistory,
   fetchHsbcPublicPair,
   fetchWisePair,
   percentDifference,
   readLatestProviderQuote,
   readProviderHistory,
-  storeProviderQuote,
   storeProviderQuotes,
   type ArchivedProviderId,
   type ProviderId,
@@ -34,6 +36,7 @@ import {
   fetchHongKongBankPair,
   type HongKongBankQuote,
 } from "./bank-rates";
+import { withEdgeCache } from "./cache";
 import { renderLlmsTxt, renderPage, renderSitemap } from "./template";
 
 interface Env {
@@ -72,23 +75,48 @@ export default {
     }
 
     if (url.pathname === "/api/rates") {
-      return handleCurrentRates(url);
+      return withEdgeCache(
+        request,
+        ctx,
+        { freshSeconds: 300, staleSeconds: 1_800 },
+        () => handleCurrentRates(url),
+      );
     }
 
     if (url.pathname === "/api/compare") {
-      return handleComparison(url, env, ctx);
+      return withEdgeCache(
+        request,
+        ctx,
+        { freshSeconds: 60, staleSeconds: 600 },
+        () => handleComparison(url, env),
+      );
     }
 
     if (url.pathname === "/api/overview") {
-      return handleOverview(url, env, ctx);
+      return withEdgeCache(
+        request,
+        ctx,
+        { freshSeconds: 60, staleSeconds: 600 },
+        () => handleOverview(url, env, ctx),
+      );
     }
 
     if (url.pathname === "/api/banks") {
-      return handleBankComparison(url, env, ctx);
+      return withEdgeCache(
+        request,
+        ctx,
+        { freshSeconds: 300, staleSeconds: 1_800 },
+        () => handleBankComparison(url, env, ctx),
+      );
     }
 
     if (url.pathname === "/api/history") {
-      return handleHistory(url, env);
+      return withEdgeCache(
+        request,
+        ctx,
+        { freshSeconds: 900, staleSeconds: 86_400 },
+        () => handleHistory(url, env),
+      );
     }
 
     const origin = url.origin;
@@ -135,6 +163,10 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
+        const scheduledEpoch = Math.floor(controller.scheduledTime / 1000);
+        const observedAt = Math.floor(scheduledEpoch / 3_600) * 3_600;
+        const utcHour = new Date(controller.scheduledTime).getUTCHours();
+        const collectBanks = shouldCollectBankArchive(controller.scheduledTime);
         const snapshot = await fetchCurrentSnapshot("USD");
         await storeSnapshot(env.DB, snapshot);
         console.log("Stored FX snapshot", {
@@ -143,34 +175,30 @@ export default {
           currencies: CURRENCY_CODES.length,
         });
 
-        const hourly = new Date(controller.scheduledTime).getUTCMinutes() === 0;
         const [hsbcQuotes, wiseQuotes, bankPairs] = await Promise.all([
           collectHsbcPublicQuotes().catch((error) => {
             console.warn("HSBC public snapshot collection skipped", error);
             return [];
           }),
-          hourly
-            ? collectWiseUsdQuotes().catch((error) => {
-                console.warn("Wise public snapshot collection skipped", error);
-                return [];
-              })
-            : Promise.resolve([]),
-          hourly
+          collectWiseUsdQuotes().catch((error) => {
+            console.warn("Wise public snapshot collection skipped", error);
+            return [];
+          }),
+          collectBanks
             ? collectHongKongBankPairs().catch((error) => {
                 console.warn("Hong Kong bank snapshot collection skipped", error);
                 return [];
               })
             : Promise.resolve([]),
         ]);
-        const bankObservedAt = Math.floor(controller.scheduledTime / 3_600_000) * 3_600;
         const bankQuotes: ProviderRateQuote[] = bankPairs.map(({ base, quote, bank }) => ({
           provider: bankProviderId(bank.id),
           base,
           quote,
           rate: bank.rate as number,
           rateType: "public_tt_rate",
-          observedAt: bankObservedAt,
-          sourceUpdatedAt: bank.observedAt ?? bankObservedAt,
+          observedAt,
+          sourceUpdatedAt: bank.observedAt ?? observedAt,
           metadata: {
             bankName: bank.name,
             calculation: bank.basis,
@@ -178,7 +206,10 @@ export default {
           },
         }));
         try {
-          await storeProviderQuotes(env.DB, [...hsbcQuotes, ...wiseQuotes, ...bankQuotes]);
+          await storeProviderQuotes(
+            env.DB,
+            bucketProviderQuotes([...hsbcQuotes, ...wiseQuotes, ...bankQuotes], observedAt),
+          );
           console.log("Stored provider snapshots", {
             hsbc: hsbcQuotes.length,
             wise: wiseQuotes.length,
@@ -188,14 +219,13 @@ export default {
           console.warn("Provider snapshot storage skipped", error);
         }
 
-        const cutoff = snapshot.fetchedAt - 400 * 86_400;
-        try {
-          await env.DB
-            .prepare("DELETE FROM provider_rate_snapshots WHERE observed_at < ?1")
-            .bind(cutoff)
-            .run();
-        } catch (error) {
-          console.warn("Provider snapshot cleanup skipped", error);
+        if (utcHour === 0) {
+          try {
+            await compactProviderHistory(env.DB, scheduledEpoch);
+            await cleanupMarketHistory(env.DB, scheduledEpoch);
+          } catch (error) {
+            console.warn("Daily history compaction skipped", error);
+          }
         }
       })(),
     );
@@ -226,7 +256,7 @@ async function handleCurrentRates(url: URL): Promise<Response> {
   }
 }
 
-async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function handleComparison(url: URL, env: Env): Promise<Response> {
   const pair = parseApiPair(url);
   if (pair instanceof Response) return pair;
   const { base, quote } = pair;
@@ -251,21 +281,6 @@ async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Prom
 
     const wise = liveWise ?? storedWise;
     const hsbc = liveHsbc ?? storedHsbc;
-    if (liveWise) {
-      ctx.waitUntil(
-        storeProviderQuote(env.DB, liveWise).catch((error) =>
-          console.warn("Wise snapshot store failed", error),
-        ),
-      );
-    }
-    if (liveHsbc) {
-      ctx.waitUntil(
-        storeProviderQuote(env.DB, liveHsbc).catch((error) =>
-          console.warn("HSBC public snapshot store failed", error),
-        ),
-      );
-    }
-
     const sources = [
       {
         id: "market",
@@ -320,7 +335,7 @@ async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Prom
 export async function handleOverview(
   url: URL,
   env: Env,
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
 ): Promise<Response> {
   const rawBase = url.searchParams.get("base") ?? "HKD";
   if (!isCurrencyCode(rawBase)) return json({ error: "Unsupported base currency" }, 400);
@@ -431,15 +446,6 @@ export async function handleOverview(
         .map((quote) => [`${quote.provider}:${quote.quote}`, quote] as const),
     );
 
-    const liveQuotes = [...liveWise.values(), ...liveHsbc.values(), ...liveBankQuotes];
-    if (liveQuotes.length > 0) {
-      ctx.waitUntil(
-        storeProviderQuotes(env.DB, liveQuotes).catch((error) =>
-          console.warn("Overview provider snapshot store failed", error),
-        ),
-      );
-    }
-
     const pairs = targets.map((quote) => {
       const marketRate = marketSnapshot.rates[quote];
       return {
@@ -503,7 +509,7 @@ export async function handleOverview(
 async function handleBankComparison(
   url: URL,
   env: Env,
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
 ): Promise<Response> {
   const pair = parseApiPair(url);
   if (pair instanceof Response) return pair;
@@ -546,30 +552,6 @@ async function handleBankComparison(
       .sort(compareBankQuotes);
     const availableBanks = banks.filter((bank) => bank.rate !== null);
     const bestBank = availableBanks[0] ?? null;
-
-    if (availableBanks.length > 0) {
-      const currentEpoch = Math.floor(Date.now() / 1000);
-      const observedAt = Math.floor(currentEpoch / 3_600) * 3_600;
-      ctx.waitUntil(
-        storeProviderQuotes(
-          env.DB,
-          availableBanks.map((bank) => ({
-            provider: bankProviderId(bank.id),
-            base,
-            quote,
-            rate: bank.rate as number,
-            rateType: "public_tt_rate",
-            observedAt,
-            sourceUpdatedAt: bank.observedAt ?? observedAt,
-            metadata: {
-              bankName: bank.name,
-              calculation: bank.basis,
-              source: bank.source,
-            },
-          })),
-        ).catch((error) => console.warn("Bank snapshot storage skipped", error)),
-      );
-    }
 
     return json(
       {
@@ -628,15 +610,27 @@ export async function handleHistory(url: URL, env: Env): Promise<Response> {
         if (!source) throw new Error("Unsupported history source");
         if (source.id === "market") {
           let marketSeries = null;
+          let archivedMarketSeries = null;
+          let reason = null;
           try {
-            marketSeries = await readD1History(env.DB, base, quote, rawDays);
+            archivedMarketSeries = await readD1History(env.DB, base, quote, rawDays);
+            marketSeries = archivedMarketSeries;
             if (marketSeries && !coversRequestedHistoryWindow(marketSeries.points, rawDays)) {
               marketSeries = null;
             }
           } catch (error) {
             console.warn("D1 history unavailable; falling back to reference history", error);
           }
-          marketSeries ??= await fetchReferenceHistory(base, quote, rawDays);
+          if (!marketSeries) {
+            try {
+              marketSeries = await fetchReferenceHistory(base, quote, rawDays);
+            } catch (error) {
+              if (!archivedMarketSeries) throw error;
+              console.warn("Reference history unavailable; using partial D1 history", error);
+              marketSeries = archivedMarketSeries;
+              reason = "外部历史源暂不可用，当前展示已有归档";
+            }
+          }
           return {
             id: source.id,
             label: source.label,
@@ -644,7 +638,7 @@ export async function handleHistory(url: URL, env: Env): Promise<Response> {
             provider: marketSeries.provider,
             frequency: marketSeries.frequency,
             points: marketSeries.points,
-            reason: null,
+            reason,
           };
         }
 
@@ -734,6 +728,10 @@ export function coversRequestedHistoryWindow(
   const requestedStart = nowEpoch - days * daySeconds;
   const coverageTolerance = Math.min(2, Math.max(1, Math.floor(days * 0.15))) * daySeconds;
   return earliestTimestamp <= requestedStart + coverageTolerance;
+}
+
+export function shouldCollectBankArchive(scheduledTime: number): boolean {
+  return new Date(scheduledTime).getUTCHours() % 8 === 0;
 }
 
 interface HistorySourceMetadata {

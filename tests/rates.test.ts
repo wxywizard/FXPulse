@@ -13,13 +13,21 @@ import {
   deriveHongKongBankPair,
   parseYoYoRateTtPage,
 } from "../src/bank-rates";
-import { deriveCrossRate, fetchCurrentSnapshot, fetchReferenceHistory } from "../src/rates";
 import {
+  deriveCrossRate,
+  fetchCurrentSnapshot,
+  fetchReferenceHistory,
+  storeSnapshot,
+} from "../src/rates";
+import {
+  bucketProviderQuotes,
+  compactProviderHistory,
   deriveHsbcPublicPair,
   fetchWisePair,
   percentDifference,
   readProviderHistory,
 } from "../src/provider-rates";
+import { withEdgeCache } from "../src/cache";
 import { renderPage, renderSitemap } from "../src/template";
 import {
   coversRequestedHistoryWindow,
@@ -27,6 +35,7 @@ import {
   handleOverview,
   parseHistorySourceIds,
   parseOverviewSourceIds,
+  shouldCollectBankArchive,
 } from "../src/index";
 
 describe("currency validation", () => {
@@ -142,9 +151,140 @@ describe("overview source validation", () => {
       )).toBe(true);
       expect(requestedUrls.filter((url) => url.includes("yoyorate.com/compare"))).toHaveLength(10);
       await Promise.all(stored);
+      expect(stored).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("free-tier storage controls", () => {
+  it("archives banks only every eight hours", () => {
+    expect(shouldCollectBankArchive(Date.parse("2026-08-05T00:00:00Z"))).toBe(true);
+    expect(shouldCollectBankArchive(Date.parse("2026-08-05T08:00:00Z"))).toBe(true);
+    expect(shouldCollectBankArchive(Date.parse("2026-08-05T16:00:00Z"))).toBe(true);
+    expect(shouldCollectBankArchive(Date.parse("2026-08-05T07:00:00Z"))).toBe(false);
+  });
+
+  it("deduplicates market snapshots by the provider update time", async () => {
+    const bindings: unknown[][] = [];
+    const db = {
+      prepare: () => ({
+        bind: (...values: unknown[]) => {
+          bindings.push(values);
+          return {};
+        },
+      }),
+      batch: async () => [],
+    } as never;
+    const rates = Object.fromEntries(CURRENCY_CODES.map((code, index) => [code, index + 1]));
+
+    await storeSnapshot(db, {
+      base: "USD",
+      provider: "ExchangeRate-API",
+      providerUrl: "https://example.com",
+      sourceUpdatedAt: 1_785_900_000,
+      fetchedAt: 1_785_903_600,
+      rates,
+    } as never);
+
+    expect(bindings).toHaveLength(CURRENCY_CODES.length);
+    expect(bindings.every((values) => values[2] === 1_785_900_000)).toBe(true);
+    expect(bindings.every((values) => values[3] === 1_785_900_000)).toBe(true);
+  });
+
+  it("uses one fixed hourly key for all scheduled provider rows", () => {
+    const quotes = bucketProviderQuotes([
+      {
+        provider: "wise",
+        base: "USD",
+        quote: "AUD",
+        rate: 1.42,
+        rateType: "mid_market",
+        observedAt: 1_785_903_777,
+        sourceUpdatedAt: 1_785_903_700,
+        metadata: {},
+      },
+    ], 1_785_902_400);
+
+    expect(quotes[0]?.observedAt).toBe(1_785_902_400);
+    expect(quotes[0]?.sourceUpdatedAt).toBe(1_785_903_700);
+  });
+
+  it("creates daily averages and caps cleanup work to protect the daily quota", async () => {
+    const queries: string[] = [];
+    const bindings: unknown[][] = [];
+    const db = {
+      prepare: (query: string) => {
+        queries.push(query);
+        return {
+          bind: (...values: unknown[]) => {
+            bindings.push(values);
+            return { run: async () => ({}) };
+          },
+        };
+      },
+    } as never;
+
+    await compactProviderHistory(db, Date.parse("2026-08-05T00:00:00Z") / 1000);
+
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("AVG(rate)");
+    expect(queries[0]).toContain("daily_average");
+    expect(queries[1]).toContain("LIMIT 12000");
+    expect(bindings[0]?.[2]).toBe(Date.parse("2026-08-04T12:00:01Z") / 1000);
+  });
+});
+
+describe("edge response cache", () => {
+  it("normalizes version keys, serves fresh hits and refreshes stale data", async () => {
+    const entries = new Map<string, Response>();
+    const cache = {
+      match: async (request: Request) => entries.get(request.url)?.clone(),
+      put: async (request: Request, response: Response) => {
+        entries.set(request.url, response.clone());
+      },
+    };
+    const pending: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+    } as unknown as ExecutionContext;
+    const loader = vi.fn(async () => Response.json({ version: loader.mock.calls.length }));
+    const policy = { freshSeconds: 60, staleSeconds: 3_600 };
+
+    const miss = await withEdgeCache(
+      new Request("https://fxpulse.example/api/history?v=one&days=30&base=AUD"),
+      ctx,
+      policy,
+      loader,
+      cache,
+      1_000,
+    );
+    expect(miss.headers.get("x-fxpulse-cache")).toBe("MISS");
+    await Promise.all(pending.splice(0));
+
+    const hit = await withEdgeCache(
+      new Request("https://fxpulse.example/api/history?base=AUD&v=two&days=30"),
+      ctx,
+      policy,
+      loader,
+      cache,
+      1_030,
+    );
+    expect(hit.headers.get("x-fxpulse-cache")).toBe("HIT");
+    expect(loader).toHaveBeenCalledOnce();
+
+    const stale = await withEdgeCache(
+      new Request("https://fxpulse.example/api/history?days=30&base=AUD"),
+      ctx,
+      policy,
+      loader,
+      cache,
+      1_061,
+    );
+    expect(stale.headers.get("x-fxpulse-cache")).toBe("STALE");
+    await Promise.all(pending.splice(0));
+    expect(loader).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -722,6 +862,40 @@ describe("multi-source history API", () => {
       expect(payload.series[0]?.provider).toContain("Frankfurter");
       expect(payload.series[0]?.frequency).toBe("daily");
       expect(payload.series[0]?.points).toHaveLength(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns partial D1 history when the external history source times out", async () => {
+    const now = Date.parse("2026-08-05T12:00:00Z") / 1000;
+    const timestamps = [now - 86_400, now];
+    const marketRows = timestamps.flatMap((observed_at, index) => [
+      { quote: "AUD", rate: 1.42 + index * 0.001, observed_at },
+      { quote: "USD", rate: 1, observed_at },
+    ]);
+    const db = {
+      prepare: () => ({
+        bind: () => ({ all: async () => ({ results: marketRows }) }),
+      }),
+    } as never;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new DOMException("Timed out", "TimeoutError");
+    }));
+
+    try {
+      const response = await handleHistory(
+        new URL("https://fxpulse.example/api/history?base=AUD&quote=USD&days=7&sources=market"),
+        { DB: db } as never,
+      );
+      const payload = (await response.json()) as {
+        series: Array<{ id: string; points: unknown[]; reason: string | null }>;
+      };
+      const market = payload.series.find((series) => series.id === "market");
+
+      expect(response.status).toBe(200);
+      expect(market?.points).toHaveLength(2);
+      expect(market?.reason).toContain("已有归档");
     } finally {
       vi.unstubAllGlobals();
     }

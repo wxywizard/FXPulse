@@ -21,6 +21,7 @@ FXPulse 是一个面向香港外币用户的多币种汇率比较与换算工具
 - Cloudflare Workers + Static Assets
 - Cloudflare D1
 - Cloudflare Cron Triggers
+- Cloudflare Workers Cache API
 - Cloudflare Vite Plugin + TypeScript + 原生 DOM
 - Vitest
 
@@ -84,7 +85,7 @@ npm run db:migrate:remote
 npm run deploy
 ```
 
-Cron 已配置为每 15 分钟运行一次（UTC），保存公共市场与 110 个有方向的汇丰公开牌价快照；每小时保存 Wise 的 USD 双向报价，并一次读取 10 个银行币种页、推导并分批归档 18 家银行全部可用方向。用户访问银行对比接口时也会按小时桶补充当前币种对快照。公开来源均不需要 Secret。
+Cron 已配置为每小时运行一次（UTC）。公共市场按来源更新时间去重；汇丰 110 个有向牌价与 Wise 的 USD 双向报价每小时归档；18 家银行只在 UTC 00:00、08:00、16:00 读取 10 个币种页并归档全部可用方向。页面 API 只读 D1，不因访问量产生额外写入。盘中数据保留 30 天并生成日均点，日线保留 400 天；所有公开 API 使用 Workers Cache API 提供新鲜缓存和旧数据回退。公开来源均不需要 Secret。
 
 ## 数据来源
 
