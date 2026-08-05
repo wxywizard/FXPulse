@@ -37,20 +37,26 @@ describe("provider adapters", () => {
   it("normalizes the current-rate payload", async () => {
     const rates = Object.fromEntries(
       ["AUD", "CAD", "CHF", "CNY", "EUR", "GBP", "HKD", "JPY", "NZD", "SGD", "USD"].map(
-        (code, index) => [code, index + 1],
+        (code) => [code, 1],
       ),
     );
-    const fetcher = async () =>
-      Response.json({
+    rates.AUD = 1.5;
+    rates.HKD = 7.8;
+    const fetcher = async (input: RequestInfo | URL) => {
+      expect(String(input)).toContain("/latest/USD");
+      return Response.json({
         result: "success",
         time_last_update_unix: 1_700_000_000,
-        base_code: "HKD",
+        base_code: "USD",
         rates,
       });
+    };
 
     const snapshot = await fetchCurrentSnapshot("HKD", fetcher as typeof fetch);
     expect(snapshot.base).toBe("HKD");
-    expect(snapshot.rates.USD).toBe(11);
+    expect(snapshot.rates.HKD).toBe(1);
+    expect(snapshot.rates.USD).toBeCloseTo(1 / 7.8, 10);
+    expect(snapshot.rates.AUD).toBeCloseTo(1.5 / 7.8, 10);
     expect(snapshot.sourceUpdatedAt).toBe(1_700_000_000);
   });
 

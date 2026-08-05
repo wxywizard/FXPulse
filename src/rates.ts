@@ -75,7 +75,7 @@ export async function fetchCurrentSnapshot(
   base: CurrencyCode,
   fetcher: typeof fetch = fetch,
 ): Promise<CurrentSnapshot> {
-  const response = await fetcher(`${CURRENT_RATES_ENDPOINT}/${base}`, {
+  const response = await fetcher(`${CURRENT_RATES_ENDPOINT}/USD`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 300 },
   });
@@ -85,17 +85,22 @@ export async function fetchCurrentSnapshot(
   }
 
   const payload = (await response.json()) as ExchangeRateApiResponse;
-  if (payload.result !== "success" || payload.base_code !== base) {
+  if (payload.result !== "success" || payload.base_code !== "USD") {
     throw new Error("Current rate provider returned an invalid payload");
   }
 
-  const rates = {} as Record<CurrencyCode, number>;
+  const usdRates: Partial<Record<CurrencyCode, number>> = {};
   for (const code of CURRENCY_CODES) {
     const rate = payload.rates[code];
     if (!isPositiveFinite(rate)) {
       throw new Error(`Current rate provider omitted ${code}`);
     }
-    rates[code] = rate;
+    usdRates[code] = rate;
+  }
+
+  const rates = {} as Record<CurrencyCode, number>;
+  for (const code of CURRENCY_CODES) {
+    rates[code] = code === base ? 1 : deriveCrossRate(usdRates, base, code);
   }
 
   return {
