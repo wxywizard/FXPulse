@@ -62,7 +62,7 @@ WHERE type = 'table'
 ORDER BY name;
 ```
 
-应看到两张表。`provider_rate_snapshots` 用于 Wise 与汇丰公开牌价归档；即使该表暂时不可用，页面仍会读取实时接口，只是没有故障降级能力。
+应看到两张表。`provider_rate_snapshots` 用于 Wise、汇丰及用户访问过的香港银行币种对归档；即使该表暂时不可用，页面仍会读取实时接口，但没有相应来源的历史与故障降级能力。
 
 ## 4. 上线验收
 
@@ -100,6 +100,24 @@ hsbc_public
 - 每项来源有独立更新时间与状态；
 - 页面反转按钮会同步更新 URL、计算器、三源比较和走势图。
 
+检查香港银行排行：
+
+```bash
+curl "https://fxpulse.177.best/api/banks?base=AUD&quote=USD"
+```
+
+银行排行响应应满足：
+
+- 银行接口固定返回 18 家银行及每行可用状态，汇丰行为官方直连；页面 `#banks` 表格按可得目标币种数量从高到低排序。
+
+检查多来源历史：
+
+```bash
+curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=market,wise,hsbc_public,bank_boc"
+```
+
+公共市场应返回可用序列；Wise、汇丰或银行归档不足时应返回带原因的 `unavailable`，不得复制公共市场点位。
+
 页面验收地址：
 
 - `https://fxpulse.177.best/rates/usd/aud`
@@ -122,6 +140,7 @@ ORDER BY provider;
 
 - `hsbc_public` 每 15 分钟最多写入 110 个有向币种对；
 - `wise` 每小时最多写入 20 个 USD 双向币种对；
+- `bank_*` 在用户访问相应银行币种对时按小时桶写入真实 TT 快照；
 - 早于 400 天的数据由 Cron 清理。
 
 ## 6. 故障判断
@@ -132,9 +151,9 @@ ORDER BY provider;
 | Wise 显示归档/暂不可用 | 检查 Worker 日志中的 `Wise public quote unavailable` |
 | 汇丰显示归档/暂不可用 | 检查 Worker 日志中的 `HSBC public quote unavailable` |
 | 汇丰牌价方向不符 | 确认页面含义是“卖出 BASE、买入 QUOTE”，并核对 `basis` |
-| 切换后仍显示旧币种 | 强制刷新页面并确认静态资源版本包含 `live-sources-v2` |
+| 切换后仍显示旧币种 | 强制刷新页面并确认页面加载最新 `app.js` 资产版本 |
 | 没有归档 | 确认 `0002_create_provider_rate_snapshots.sql` 已执行且 Cron 存在 |
 
 ## 7. 回滚
 
-代码回滚应通过 Git revert 创建新提交并推送 `main`，由 Cloudflare 自动重新部署。不要删除 D1 表；旧快照与新版本兼容，历史 `hsbc_deposit_plus` 行会被忽略。
+代码回滚应通过 Git revert 创建新提交并推送 `main`，由 Cloudflare 自动重新部署。不要删除 D1 表；现有公共市场、Wise、汇丰和银行快照与前一版本兼容。

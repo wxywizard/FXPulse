@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "FXPulse — public market, Wise and HSBC Hong Kong exchange-rate comparison.",
+  "description": "FXPulse — multi-source exchange-rate comparison, calculator and history charts for Hong Kong users.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -20,11 +20,19 @@ import {
   fetchWisePair,
   percentDifference,
   readLatestProviderQuote,
+  readProviderHistory,
   storeProviderQuote,
   storeProviderQuotes,
+  type ArchivedProviderId,
   type ProviderId,
   type ProviderRateQuote,
 } from "./provider-rates";
+import {
+  HONG_KONG_BANKS,
+  compareBankQuotes,
+  fetchHongKongBankPair,
+  type HongKongBankQuote,
+} from "./bank-rates";
 import { renderLlmsTxt, renderPage, renderSitemap } from "./template";
 
 interface Env {
@@ -72,6 +80,10 @@ export default {
 
     if (url.pathname === "/api/overview") {
       return handleOverview(url, env, ctx);
+    }
+
+    if (url.pathname === "/api/banks") {
+      return handleBankComparison(url, env, ctx);
     }
 
     if (url.pathname === "/api/history") {
@@ -269,7 +281,7 @@ async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Prom
         direction: `1 ${base} = x ${quote}`,
         sources,
         interpretation:
-          `三列均按“卖出 ${base}、买入 ${quote}”比较。汇丰公开牌价按 TT Buy / TT Sell 经 HKD 交叉计算，已包含银行买卖价差，因此反转币种后不会简单取倒数；它不是 Deposit Plus 登录后优惠价或保证成交价。`,
+          `三列均按“卖出 ${base}、买入 ${quote}”比较。汇丰公开牌价按 TT Buy / TT Sell 经 HKD 交叉计算，已包含银行买卖价差，因此反转币种后不会简单取倒数；它不是登录后优惠价或保证成交价。`,
       },
       200,
       60,
@@ -387,7 +399,113 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
   }
 }
 
-async function handleHistory(url: URL, env: Env): Promise<Response> {
+async function handleBankComparison(
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const pair = parseApiPair(url);
+  if (pair instanceof Response) return pair;
+  const { base, quote } = pair;
+
+  try {
+    const [marketSnapshot, bankResult, officialHsbc] = await Promise.all([
+      fetchCurrentSnapshot(base),
+      fetchHongKongBankPair(base, quote, Number.NaN),
+      fetchHsbcPublicPair(base, quote).catch((error) => {
+        console.warn("Official HSBC quote unavailable in bank comparison", error);
+        return null;
+      }),
+    ]);
+    const marketRate = marketSnapshot.rates[quote];
+    const banks = bankResult.banks
+      .map((bank): HongKongBankQuote => {
+        if (bank.id === "hsbc" && officialHsbc) {
+          return {
+            ...bank,
+            status: "available",
+            rate: officialHsbc.rate,
+            differenceFromMarketPct: percentDifference(officialHsbc.rate, marketRate),
+            observedAt: officialHsbc.observedAt,
+            basis: String(officialHsbc.metadata.calculation ?? "汇丰官方 TT 牌价"),
+            source: "HSBC Hong Kong",
+            sourceUrl:
+              "https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/",
+            reason: null,
+            baseTtBuyHkd: numberMetadata(officialHsbc.metadata.baseTtBuyHkd),
+            quoteTtSellHkd: numberMetadata(officialHsbc.metadata.quoteTtSellHkd),
+          };
+        }
+        return {
+          ...bank,
+          differenceFromMarketPct:
+            bank.rate === null ? null : percentDifference(bank.rate, marketRate),
+        };
+      })
+      .sort(compareBankQuotes);
+    const availableBanks = banks.filter((bank) => bank.rate !== null);
+    const bestBank = availableBanks[0] ?? null;
+
+    if (availableBanks.length > 0) {
+      const currentEpoch = Math.floor(Date.now() / 1000);
+      const observedAt = Math.floor(currentEpoch / 3_600) * 3_600;
+      ctx.waitUntil(
+        storeProviderQuotes(
+          env.DB,
+          availableBanks.map((bank) => ({
+            provider: bankProviderId(bank.id),
+            base,
+            quote,
+            rate: bank.rate as number,
+            rateType: "public_tt_rate",
+            observedAt,
+            sourceUpdatedAt: bank.observedAt ?? observedAt,
+            metadata: {
+              bankName: bank.name,
+              calculation: bank.basis,
+              source: bank.source,
+            },
+          })),
+        ).catch((error) => console.warn("Bank snapshot storage skipped", error)),
+      );
+    }
+
+    return json(
+      {
+        base,
+        quote,
+        unit: 1,
+        direction: `卖出 ${base}，买入 ${quote}`,
+        marketRate,
+        availableBankCount: availableBanks.length,
+        totalBankCount: banks.length,
+        bestBank: bestBank
+          ? { id: bestBank.id, name: bestBank.name, rate: bestBank.rate }
+          : null,
+        banks: banks.map((bank, index) => ({
+          ...bank,
+          rank: bank.rate === null ? null : index + 1,
+          observedAt:
+            bank.observedAt === null ? null : new Date(bank.observedAt * 1000).toISOString(),
+        })),
+        warnings: bankResult.warnings,
+        source: {
+          provider: "YoYoRate",
+          providerUrl: "https://yoyorate.com/",
+          note: "聚合香港银行公开电汇买卖价；汇丰一行由汇丰香港官方公开接口校准。",
+        },
+        interpretation: `全部银行统一按“卖出 ${base}、买入 ${quote}”计算；外币交叉盘使用 BASE TT 买入 ÷ QUOTE TT 卖出，因此反向不会简单互为倒数。数值越高，表示 1 ${base} 可换得的 ${quote} 越多。`,
+      },
+      200,
+      300,
+    );
+  } catch (error) {
+    console.error("Hong Kong bank comparison API failed", error);
+    return json({ error: "Hong Kong bank rates are temporarily unavailable" }, 503, 30);
+  }
+}
+
+export async function handleHistory(url: URL, env: Env): Promise<Response> {
   const rawBase = url.searchParams.get("base") ?? "HKD";
   const rawQuote = url.searchParams.get("quote") ?? "USD";
   const rawDays = Number(url.searchParams.get("days") ?? "30");
@@ -399,27 +517,157 @@ async function handleHistory(url: URL, env: Env): Promise<Response> {
   const quote = normalizeCurrency(rawQuote);
   if (base === quote) return json({ error: "Base and quote must be different" }, 400);
 
+  const requestedSourceIds = [
+    ...new Set(
+      (url.searchParams.get("sources") ?? "market")
+        .split(",")
+        .map((source) => source.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const sourceMetadata = requestedSourceIds.map(historySourceMetadata);
+  if (sourceMetadata.some((source) => source === null)) {
+    return json({ error: "Unsupported history source" }, 400);
+  }
+
   try {
-    let series = null;
-    try {
-      series = await readD1History(env.DB, base, quote, rawDays);
-    } catch (error) {
-      console.warn("D1 history unavailable; falling back to reference history", error);
-    }
-    series ??= await fetchReferenceHistory(base, quote, rawDays);
+    const series = await Promise.all(
+      sourceMetadata.map(async (source) => {
+        if (!source) throw new Error("Unsupported history source");
+        if (source.id === "market") {
+          let marketSeries = null;
+          try {
+            marketSeries = await readD1History(env.DB, base, quote, rawDays);
+          } catch (error) {
+            console.warn("D1 history unavailable; falling back to reference history", error);
+          }
+          marketSeries ??= await fetchReferenceHistory(base, quote, rawDays);
+          return {
+            id: source.id,
+            label: source.label,
+            status: "available",
+            provider: marketSeries.provider,
+            frequency: marketSeries.frequency,
+            points: marketSeries.points,
+            reason: null,
+          };
+        }
+
+        try {
+          const points = await readProviderHistory(
+            env.DB,
+            source.provider,
+            base,
+            quote,
+            rawDays,
+            source.allowInverse,
+          );
+          if (points.length < 2) {
+            return {
+              id: source.id,
+              label: source.label,
+              status: "unavailable",
+              provider: source.providerLabel,
+              frequency: "intraday",
+              points: [],
+              reason: "真实历史快照仍在积累，至少需要两个数据点",
+            };
+          }
+          return {
+            id: source.id,
+            label: source.label,
+            status: "available",
+            provider: source.providerLabel,
+            frequency: "intraday",
+            points,
+            reason: null,
+          };
+        } catch (error) {
+          console.warn(`History source ${source.id} unavailable`, error);
+          return {
+            id: source.id,
+            label: source.label,
+            status: "unavailable",
+            provider: source.providerLabel,
+            frequency: "intraday",
+            points: [],
+            reason: "历史归档暂不可用",
+          };
+        }
+      }),
+    );
+    const marketSeries = series.find((item) => item.id === "market" && item.status === "available");
     return json(
       {
         marketType: "reference",
-        disclaimer: "Historical reference rates; not HSBC transaction prices.",
-        ...series,
+        disclaimer: "Historical public and bank rates are indicative, not guaranteed transaction prices.",
+        base,
+        quote,
+        days: rawDays,
+        series,
+        points: marketSeries?.points ?? [],
+        provider: marketSeries?.provider ?? "Multiple FXPulse sources",
+        frequency: marketSeries?.frequency ?? "intraday",
       },
       200,
-      series.frequency === "intraday" ? 300 : 3600,
+      300,
     );
   } catch (error) {
     console.error("History API failed", error);
     return json({ error: "Historical reference rates are temporarily unavailable" }, 503, 30);
   }
+}
+
+interface HistorySourceMetadata {
+  id: string;
+  label: string;
+  provider: ArchivedProviderId;
+  providerLabel: string;
+  allowInverse: boolean;
+}
+
+function historySourceMetadata(id: string): HistorySourceMetadata | null {
+  if (id === "market") {
+    return {
+      id,
+      label: "公共市场",
+      provider: "wise",
+      providerLabel: "ExchangeRate-API / Frankfurter",
+      allowInverse: true,
+    };
+  }
+  if (id === "wise") {
+    return {
+      id,
+      label: "Wise 中间价",
+      provider: "wise",
+      providerLabel: "FXPulse archive · Wise",
+      allowInverse: true,
+    };
+  }
+  if (id === "hsbc_public") {
+    return {
+      id,
+      label: "汇丰公开 TT",
+      provider: "hsbc_public",
+      providerLabel: "FXPulse archive · HSBC Hong Kong",
+      allowInverse: false,
+    };
+  }
+  const bankId = id.match(/^bank_([a-z0-9]+)$/)?.[1];
+  const bank = HONG_KONG_BANKS.find((item) => item.id === bankId);
+  if (!bank) return null;
+  return {
+    id,
+    label: bank.name,
+    provider: bankProviderId(bank.id),
+    providerLabel: `FXPulse archive · ${bank.name}`,
+    allowInverse: false,
+  };
+}
+
+function bankProviderId(id: string): ArchivedProviderId {
+  return `bank_${id}`;
 }
 
 function parsePagePair(pathname: string): { base: CurrencyCode; quote: CurrencyCode } | null {
@@ -520,6 +768,11 @@ function serializeMarketSource(
     providerUrl: marketSnapshot.providerUrl,
     reason: null,
   };
+}
+
+function numberMetadata(value: string | number | null | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function json(payload: unknown, status = 200, maxAge = 0): Response {

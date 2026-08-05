@@ -6,8 +6,9 @@ import {
   type CurrencyCode,
 } from "./currencies";
 import type { CurrentSnapshot } from "./rates";
+import { HONG_KONG_BANKS } from "./bank-rates";
 
-const ASSET_VERSION = "20260805-overview-v3";
+const ASSET_VERSION = "20260805-controls-v2";
 
 interface PageOptions {
   origin: string;
@@ -22,7 +23,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   const canonicalPath = `/rates/${base.toLowerCase()}/${quote.toLowerCase()}`;
   const canonical = `${origin}${canonicalPath}`;
   const title = `${base}/${quote} 汇率与历史走势｜FXPulse`;
-  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise 公开中间价与汇丰香港公开 TT 牌价，并查看 7、15、30、90、365 天走势。`;
+  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise、汇丰及 18 家香港银行公开 TT 牌价，并查看 7、15、30、90、365 天走势。`;
   const initialData = escapeScriptJson(
     JSON.stringify({ base, quote, snapshot, generatedAt: new Date().toISOString() }),
   );
@@ -70,18 +71,19 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
     </a>
     <nav aria-label="主要导航">
       <a href="#compare">三源对比</a>
+      <a href="#banks">银行牌价</a>
       <a href="#rates">币种总览</a>
       <a href="#trend">趋势</a>
       <a href="#methodology">数据说明</a>
     </nav>
-    <span class="market-pill"><span></span>三源报价对比</span>
+    <span class="market-pill"><span></span>18 家银行牌价</span>
   </header>
 
   <main id="main">
     <section class="hero" aria-labelledby="hero-title">
       <div class="eyebrow"><span>FX</span> 为香港外币用户而做</div>
       <h1 id="hero-title">外汇变化，<em>一眼看清。</em></h1>
-      <p>同一币种方向，对比公共市场、Wise 公开中间价与汇丰香港公开牌价，再结合近期走势判断差异。</p>
+      <p>同一币种方向，对比公共市场、Wise、汇丰官方牌价与 18 家香港银行 TT 汇率，再结合近期走势判断差异。</p>
       <div class="hero-meta">
         <span><b id="status-dot" class="status-dot ${snapshot ? "" : "pending"}"></b><span id="data-status">${snapshot ? "数据源正常" : "正在连接数据源"}</span></span>
         <span>提供方更新：<time id="source-updated">${updatedText}</time> HKT</span>
@@ -122,7 +124,16 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
           </div>
         </div>
       </div>
-      <p class="calculator-rate">按公共市场参考价估算 · <span id="calculator-rate">1 ${base} = — ${quote}</span></p>
+      <div class="calculator-source-row">
+        <label class="calculator-source-field" for="calculator-source">
+          <span>计算汇率来源</span>
+          <select id="calculator-source" aria-describedby="calculator-source-note">
+            ${calculatorSourceOptions()}
+          </select>
+        </label>
+        <p id="calculator-source-note">默认使用公共市场参考价；可切换 Wise、汇丰或其他香港银行公开 TT 牌价。</p>
+      </div>
+      <p class="calculator-rate"><span id="calculator-rate-source">公共市场参考价</span> · <span id="calculator-rate">1 ${base} = — ${quote}</span></p>
     </section>
 
     <section id="compare" class="section comparison-section" aria-labelledby="comparison-title">
@@ -137,6 +148,36 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
         ${renderComparisonPlaceholders(base, quote)}
       </div>
       <p id="comparison-note" class="comparison-note">正在加载各来源的可用报价与更新时间。</p>
+    </section>
+
+    <section id="banks" class="section bank-section" aria-labelledby="banks-title">
+      <div class="section-heading bank-heading">
+        <div>
+          <span class="section-kicker">HONG KONG BANK TT RATES</span>
+          <h2 id="banks-title"><span id="banks-base">${base}</span>/<span id="banks-quote">${quote}</span> 香港银行牌价</h2>
+        </div>
+        <p>按客户卖出 <span id="banks-sell">${base}</span>、买入 <span id="banks-buy">${quote}</span> 的实际方向排序</p>
+      </div>
+      <div class="bank-summary" aria-live="polite">
+        <div><span>当前方向</span><strong id="bank-direction">卖出 ${base} → 买入 ${quote}</strong></div>
+        <div><span>最佳可得</span><strong id="bank-best">正在加载</strong></div>
+        <div><span>可用银行</span><strong id="bank-available">— / 18</strong></div>
+      </div>
+      <p id="bank-error" class="inline-error" role="alert" hidden></p>
+      <div class="bank-table-wrap">
+        <table class="bank-table">
+          <thead>
+            <tr><th>排名</th><th>银行</th><th id="bank-rate-column">1 ${base} 可得 ${quote}</th><th>较市场价</th><th>TT 计算口径</th><th>采集时间</th></tr>
+          </thead>
+          <tbody id="bank-table-body">
+            ${renderBankPlaceholders()}
+          </tbody>
+        </table>
+      </div>
+      <div class="bank-table-note">
+        <p id="bank-note">正在读取公开电汇买卖价。数值越高，代表同样 1 ${base} 可换得更多 ${quote}。</p>
+        <a href="https://yoyorate.com/" target="_blank" rel="noopener noreferrer">查看聚合来源 <span aria-hidden="true">↗</span></a>
+      </div>
     </section>
 
     <section id="rates" class="section rates-section" aria-labelledby="rates-title">
@@ -173,10 +214,32 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
             <h2 id="trend-title"><span id="pair-base">${base}</span> / <span id="pair-quote">${quote}</span></h2>
             <p><span id="pair-base-name">${baseMeta.name}</span>兑<span id="pair-quote-name">${quoteMeta.name}</span></p>
           </div>
-          <div class="range-switcher" role="group" aria-label="历史周期">
-            ${[7, 15, 30, 90, 365].map((days) => `<button type="button" data-days="${days}" class="${days === 30 ? "active" : ""}" aria-pressed="${days === 30}">${days === 365 ? "1年" : `${days}天`}</button>`).join("")}
+          <div class="chart-header-controls">
+            <div class="chart-type-switcher" role="group" aria-label="图表类型">
+              <button type="button" data-chart-type="line" class="active" aria-pressed="true">折线图</button>
+              <button type="button" data-chart-type="bar" aria-pressed="false">柱状图</button>
+            </div>
+            <div class="range-switcher" role="group" aria-label="历史周期">
+              ${[7, 15, 30, 90, 365].map((days) => `<button type="button" data-days="${days}" class="${days === 30 ? "active" : ""}" aria-pressed="${days === 30}">${days === 365 ? "1年" : `${days}天`}</button>`).join("")}
+            </div>
           </div>
         </div>
+        <div id="chart-source-picker" class="chart-source-picker">
+          <span class="chart-source-title">历史数据源（可多选）</span>
+          <div class="chart-core-sources">
+            ${historySourceCheckbox("market", "公共市场", true)}
+            ${historySourceCheckbox("wise", "Wise 中间价")}
+            ${historySourceCheckbox("hsbc_public", "汇丰公开 TT")}
+          </div>
+          <details class="chart-bank-picker">
+            <summary>香港银行 <b id="chart-bank-count">0</b> / ${HONG_KONG_BANKS.length}</summary>
+            <div class="chart-bank-options">
+              ${HONG_KONG_BANKS.map((bank) => historySourceCheckbox(`bank_${bank.id}`, bank.name)).join("")}
+            </div>
+          </details>
+          <p id="chart-selection-note">已选择 1 个数据源。银行历史仅使用 FXPulse 真实归档，数据不足时会明确标注。</p>
+        </div>
+        <div id="chart-legend" class="chart-legend" aria-live="polite"></div>
         <div id="chart-wrap" class="chart-wrap" aria-live="polite">
           <div class="chart-loading"><span></span>正在加载历史数据</div>
         </div>
@@ -187,7 +250,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
         <span class="section-kicker">RANGE SNAPSHOT</span>
         <h2>区间概览</h2>
         <div class="current-rate">
-          <span>当前参考价</span>
+          <span id="stat-source">公共市场 · 当前值</span>
           <strong id="stat-current">—</strong>
           <small id="stat-pair">${quote} / ${base}</small>
         </div>
@@ -204,11 +267,11 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <div>
         <span class="section-kicker">CLEAR BY DESIGN</span>
         <h2 id="method-title">先看清数据，再做决定。</h2>
-        <p>公共市场价用于建立统一基准；Wise 读取其公开货币转换器中间价；汇丰读取香港官网公开的 TT Buy / TT Sell 牌价，并按兑换方向经 HKD 计算交叉汇率。</p>
+        <p>公共市场价用于建立统一基准；Wise 读取公开中间价；汇丰读取香港官网 TT 牌价；其他香港银行通过公开聚合页读取 TT Buy / TT Sell，并按同一兑换方向经 HKD 计算交叉汇率。</p>
       </div>
       <div class="method-grid">
         <article><span>01</span><h3>同方向再比较</h3><p>切换或反转币种后，所有来源统一换算为“1 基准币种 = x 目标币种”。</p></article>
-        <article><span>02</span><h3>保留买卖价差</h3><p>汇丰正反向分别按 TT Buy 与 TT Sell 计算，不用简单倒数掩盖银行买卖价差。</p></article>
+        <article><span>02</span><h3>保留买卖价差</h3><p>18 家银行正反向分别按 TT Buy 与 TT Sell 计算，不用简单倒数掩盖银行买卖价差。</p></article>
         <article><span>03</span><h3>报价不是建议</h3><p>FXPulse 不预测收益、不推荐币种，也不代替产品文件或专业意见。</p></article>
       </div>
     </section>
@@ -217,16 +280,23 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <span aria-hidden="true">!</span>
       <div>
         <h2>重要风险提示</h2>
-        <p>页面中的“汇丰公开牌价”是官网指示性 TT 牌价，不是登录后优惠价，也不是 Deposit Plus 的协定汇率、利率或保证成交价。实际交易以汇丰确认页面为准。</p>
+        <p>银行列表是公开指示性 TT 牌价，不是登录后优惠价或保证成交价；聚合数据与银行官网可能存在几分钟时间差。实际交易以相应银行确认页面为准。</p>
       </div>
-      <a href="https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/" target="_blank" rel="noopener noreferrer">查看汇丰公开牌价 <span aria-hidden="true">↗</span></a>
+      <a href="https://yoyorate.com/" target="_blank" rel="noopener noreferrer">查看数据来源 <span aria-hidden="true">↗</span></a>
+    </section>
+
+    <section class="authorization-note" aria-labelledby="authorization-title">
+      <span class="section-kicker">DATA USE &amp; AUTHORIZATION</span>
+      <h2 id="authorization-title">本站数据须经书面授权方可使用</h2>
+      <p>未经 FXPulse 权利方书面授权，不得抓取、复制、镜像、转载、分发、转售、商业使用本站数据或整理结果；未经授权使用将被视为侵权。获得授权后仍必须在显著位置标注数据来自 FXPulse，并提供指向本项目公开仓库的可点击链接。</p>
+      <a href="https://github.com/wxywizard/FXPulse" target="_blank" rel="noopener noreferrer">https://github.com/wxywizard/FXPulse <span aria-hidden="true">↗</span></a>
     </section>
   </main>
 
   <footer>
     <a class="brand footer-brand" href="/"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>FX<span>Pulse</span></span></a>
-    <p>独立汇率信息工具 · 与 HSBC/汇丰无隶属或合作关系</p>
-    <p>© ${new Date().getUTCFullYear()} FXPulse</p>
+    <p>独立汇率信息工具 · 与所列银行及 Wise 无隶属或合作关系</p>
+    <p>© ${new Date().getUTCFullYear()} FXPulse · All rights reserved</p>
   </footer>
 
   <script id="fxpulse-data" type="application/json">${initialData}</script>
@@ -252,6 +322,20 @@ function renderComparisonPlaceholders(base: CurrencyCode, quote: CurrencyCode): 
     .join("");
 }
 
+function renderBankPlaceholders(): string {
+  return Array.from(
+    { length: 6 },
+    (_, index) => `<tr class="bank-row bank-row-loading">
+      <td class="bank-rank">${index + 1}</td>
+      <td class="bank-name"><strong>银行牌价加载中</strong><small>正在确认可用币种</small></td>
+      <td class="bank-rate">—</td>
+      <td class="bank-diff">—</td>
+      <td class="bank-basis">—</td>
+      <td class="bank-updated">—</td>
+    </tr>`,
+  ).join("");
+}
+
 function currencyOptions(selected: CurrencyCode): string {
   return CURRENCY_CODES.map((code) => {
     const meta = CURRENCIES[code];
@@ -264,7 +348,7 @@ function renderRateCards(
   activeQuote: CurrencyCode,
   snapshot: CurrentSnapshot | null,
 ): string {
-  return CURRENCY_CODES.filter((code) => code !== base)
+  return orderedQuoteCodes(base, activeQuote)
     .map((code) => {
       const meta = CURRENCIES[code];
       const rate = snapshot?.rates[code];
@@ -272,7 +356,7 @@ function renderRateCards(
         <span class="rate-card-header">
           <span class="flag" aria-hidden="true">${meta.flag}</span>
           <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
-          <span class="pair-direction">1 ${base} → ${code}</span>
+          <span class="pair-direction">${code === activeQuote ? "当前目标 · " : ""}1 ${base} → ${code}</span>
           <span class="card-arrow" aria-hidden="true">↗</span>
         </span>
         <span class="provider-rate-list">
@@ -298,6 +382,28 @@ function renderRateCards(
     .join("");
 }
 
+function orderedQuoteCodes(base: CurrencyCode, activeQuote: CurrencyCode): CurrencyCode[] {
+  return [
+    activeQuote,
+    ...CURRENCY_CODES.filter((code) => code !== base && code !== activeQuote),
+  ];
+}
+
+function calculatorSourceOptions(): string {
+  return `<optgroup label="市场与公开来源">
+    <option value="market" selected>公共市场参考价（默认）</option>
+    <option value="wise">Wise 公开中间价</option>
+    <option value="hsbc_public">汇丰公开 TT</option>
+  </optgroup>
+  <optgroup label="香港银行公开 TT">
+    ${HONG_KONG_BANKS.map((bank) => `<option value="bank_${bank.id}">${bank.name}</option>`).join("")}
+  </optgroup>`;
+}
+
+function historySourceCheckbox(id: string, label: string, checked = false): string {
+  return `<label class="chart-source-option"><input type="checkbox" value="${id}" data-history-source ${checked ? "checked" : ""}><span><i></i>${label}</span></label>`;
+}
+
 function renderStructuredData(input: {
   origin: string;
   base: CurrencyCode;
@@ -315,7 +421,7 @@ function renderStructuredData(input: {
         url: input.origin,
         applicationCategory: "FinanceApplication",
         operatingSystem: "Web",
-        description: "公共市场、Wise 公开中间价与汇丰香港公开 TT 牌价比较及历史趋势工具",
+        description: "公共市场、Wise、汇丰及 18 家香港银行公开 TT 牌价比较与历史趋势工具",
         inLanguage: "zh-Hans",
         offers: { "@type": "Offer", price: "0", priceCurrency: "HKD" },
       },
@@ -326,7 +432,10 @@ function renderStructuredData(input: {
         url: input.canonical,
         temporalCoverage: "P1Y",
         creator: { "@type": "Organization", name: "FXPulse" },
-        isAccessibleForFree: true,
+        isAccessibleForFree: false,
+        license: "https://github.com/wxywizard/FXPulse/blob/main/LICENSE",
+        conditionsOfAccess:
+          "Viewing is public. Reuse requires prior written authorization, prominent FXPulse attribution, and a link to the FXPulse repository.",
       },
       {
         "@type": "FAQPage",
@@ -336,7 +445,7 @@ function renderStructuredData(input: {
             name: "FXPulse 的汇丰列是什么报价？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "汇丰列显示香港官网公开 TT 牌价。客户卖出基准币种使用 TT Buy，买入目标币种使用 TT Sell；外币交叉盘经 HKD 计算。它不等于登录后优惠价、Deposit Plus 协定汇率或保证成交价。",
+              text: "汇丰列显示香港官网公开 TT 牌价。客户卖出基准币种使用 TT Buy，买入目标币种使用 TT Sell；外币交叉盘经 HKD 计算。它不等于登录后优惠价或保证成交价。",
             },
           },
           {
@@ -345,6 +454,14 @@ function renderStructuredData(input: {
             acceptedAnswer: {
               "@type": "Answer",
               text: "页面访问时实时读取三项来源并显示各自更新时间；Cloudflare Cron 每 15 分钟归档公共市场与汇丰牌价，Wise 每小时归档一次作为故障降级。",
+            },
+          },
+          {
+            "@type": "Question",
+            name: "FXPulse 包含哪些香港银行牌价？",
+            acceptedAnswer: {
+              "@type": "Answer",
+              text: "银行列表覆盖 18 家公开发布电汇买卖价的香港零售银行。所有银行统一按客户卖出基准币种、买入目标币种计算；外币交叉盘经 HKD 换算并保留买卖价差。",
             },
           },
         ],
@@ -376,7 +493,7 @@ export function renderSitemap(origin: string): string {
 
 export function renderLlmsTxt(origin: string): string {
   const defaultPair = defaultQuote("HKD");
-  return `# FXPulse\n\n> FXPulse is an independent exchange-rate comparison tool for the 11 currencies relevant to HSBC Hong Kong foreign-currency products. It is not affiliated with HSBC or Wise.\n\n## What the site provides\n- Same-direction comparison of a public market reference rate, Wise's public mid-market rate, and HSBC Hong Kong's public TT board rate.\n- Reversible directed pairs such as USD/AUD and AUD/USD, with HSBC bid/ask spread preserved in each direction.\n- A standalone amount calculator that does not change the unit rates below it.\n- Base and quote currency selectors plus 7, 15, 30, 90 and 365 day trend windows.\n\n## Important interpretation\n- HSBC cross-rates are calculated through HKD: the base leg uses TT Buy and the quote leg uses TT Sell.\n- HSBC public board rates are indicative and are not logged-in preferential rates, Deposit Plus terms, or guaranteed transaction prices.\n- Source timestamps and provider status are shown separately.\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n- Data collection: https://github.com/wxywizard/FXPulse/blob/main/docs/DATA_COLLECTION.md\n\n## Sources\n- Public market reference rates: https://www.exchangerate-api.com/\n- Wise public currency converter: https://wise.com/gb/currency-converter/\n- HSBC Hong Kong public currency rates: https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/\n- Historical institutional reference rates: https://frankfurter.dev/\n`;
+  return `# FXPulse\n\n> FXPulse is an independent exchange-rate comparison tool for 11 currencies and 18 Hong Kong retail banks. It is not affiliated with any bank or Wise.\n\n## What the site provides\n- Same-direction comparison of a public market reference rate, Wise's public mid-market rate, and Hong Kong bank public TT board rates.\n- A ranked table of public TT customer exchange rates from 18 Hong Kong retail banks.\n- Reversible directed pairs, a selectable-source calculator, and multi-source line or layered bar charts.\n- Base and quote currency selectors plus 7, 15, 30, 90 and 365 day trend windows.\n\n## Important interpretation\n- Bank cross-rates are calculated through HKD: the base leg uses TT Buy and the quote leg uses TT Sell.\n- Public board rates are indicative and are not logged-in preferential rates or guaranteed transaction prices.\n- Aggregated bank data can lag official bank pages by several minutes; HSBC is verified against its official public endpoint.\n- Source timestamps and provider status are shown separately.\n\n## Data-use authorization\n- The repository is source-visible but is not open-source software. All rights are reserved.\n- Viewing and search indexing are permitted. Scraping, copying, redistributing, commercial use, dataset creation, model training, or API mirroring requires prior written authorization.\n- Every authorized use must prominently attribute FXPulse and link to https://github.com/wxywizard/FXPulse.\n- Full private-use terms: https://github.com/wxywizard/FXPulse/blob/main/LICENSE\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n- Data collection: https://github.com/wxywizard/FXPulse/blob/main/docs/DATA_COLLECTION.md\n\n## Sources\n- Public market reference rates: https://www.exchangerate-api.com/\n- Wise public currency converter: https://wise.com/gb/currency-converter/\n- HSBC Hong Kong public currency rates: https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/\n- Hong Kong bank TT rate aggregation: https://yoyorate.com/\n- Historical institutional reference rates: https://frankfurter.dev/\n`;
 }
 
 function escapeScriptJson(value: string): string {

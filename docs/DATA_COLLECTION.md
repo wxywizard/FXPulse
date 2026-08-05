@@ -1,17 +1,18 @@
 # FXPulse 数据采集方案
 
-版本：v1.2<br>
+版本：v1.4<br>
 更新时间：2026-08-05
 
-## 1. 三项数据口径
+## 1. 数据口径
 
 | 来源 | 页面名称 | 当前价获取方式 | 归档频率 |
 |---|---|---|---|
 | 公共市场 | 公共市场参考价 | ExchangeRate-API 的 USD 锚定公开快照 | 每 15 分钟 |
 | Wise | Wise 公开中间价 | `wise.com/rates/live` 当前币种对 | 每小时保存 USD 双向报价 |
 | 汇丰香港 | 汇丰公开牌价（TT） | 香港官网公开 `exchange-rate` JSON 中的 TT Buy / TT Sell | 每 15 分钟保存 110 个有向币种对 |
+| 18 家香港银行 | 香港银行 TT 排行 | YoYoRate 公开聚合页中的 TT Buy / TT Sell；汇丰行由官网接口校准 | 页面按需读取，边缘缓存 5 分钟 |
 
-三项来源均自动采集，不需要账号、Token、Cookie 或用户手工导入。任一来源失败时只回退到它自己的 D1 归档，不允许用另一项汇率冒充。
+全部来源均自动采集，不需要账号、Token、Cookie 或用户手工导入。公共市场、Wise 与汇丰失败时只回退到各自 D1 归档；银行聚合页缺失时返回明确警告和不可用状态，不允许用另一项汇率冒充。
 
 ## 2. 公共市场参考价
 
@@ -83,32 +84,43 @@ AUD/USD = 5.48660 / 7.87570
 
 两个方向不会互为倒数，这是银行买卖价差的结果，不是计算错误。
 
-## 5. 与 Deposit Plus 的边界
+## 5. 香港银行 TT 排行
 
-汇丰公开牌价可匿名、自动、稳定地用于比较，但它不等于：
+Worker 按币种读取公开聚合页，例如：
 
-- Deposit Plus 登录后的 `exchangeSpotRate`；
-- `conversionRate` 或盈亏平衡汇率；
-- 具体金额、期限、客户等级对应的产品利率；
-- 保证成交价或投资回报。
+```http
+GET https://yoyorate.com/compare/hk/hkd-to-aud
+GET https://yoyorate.com/compare/hk/hkd-to-usd
+```
 
-FXPulse 页面必须明确标注“汇丰公开牌价（TT）”。在没有授权产品报价前，不再展示空白的“Deposit Plus 实时价”卡片，也不使用公共市场价冒充。
+当前覆盖中银香港、交通银行（香港）、中国建设银行（亚洲）、创兴、集友、招商永隆、中信银行（国际）、大新、星展、富邦、恒生、东亚、汇丰、工银亚洲、南洋商业、华侨、大众及上海商业银行，共 18 家。这里只代表能从同一公开页面取得可比 TT Buy / TT Sell 的零售银行，不等于香港金融管理局认可机构名册中的全部银行。
 
-## 6. D1 与降级
+方向计算与汇丰一致：客户卖出 BASE 使用 BASE TT Buy，客户买入 QUOTE 使用 QUOTE TT Sell；外币交叉盘经 HKD 计算。列表按 1 BASE 可获得的 QUOTE 数量由高到低排序。某银行没有目标币种或缺少任一侧牌价时，保留银行名称并标记“暂不可用”，不推算缺失值。
+
+汇丰一行用官网匿名 JSON 覆盖聚合值并标记“官方直连”；其余银行标记“公开聚合”。响应包含原始来源链接、采集时间、计算口径与相对市场价差。聚合页可能比银行官网滞后数分钟，最终交易仍以银行确认页面为准。
+
+## 6. 公开牌价边界
+
+汇丰与其他银行的公开 TT 牌价可用于同方向比较，但不等于登录后优惠价、包含全部费用的最终到账汇率或保证成交价。FXPulse 页面必须显示来源、买卖方向、更新时间及指示性数据提示，不使用公共市场价冒充缺失的银行报价。
+
+## 7. D1 与降级
 
 `provider_rate_snapshots` 保存来源、方向、报价类型、采集时间、来源更新时间和计算口径。读取规则：
 
 - Wise：优先同方向归档；必要时可读取反方向并取倒数；
 - 汇丰：只能读取完全相同方向的归档，禁止取倒数；
+- 其他香港银行：页面访问 `/api/banks` 时按小时桶归档当前币种对可用真实快照，只能读取完全相同方向；
 - 实时请求成功显示“实时”；
 - 实时请求失败但有归档显示“归档”；
 - 两者都没有显示“暂不可用”。
 
-## 7. 验证
+## 8. 验证
 
 ```bash
 curl "https://fxpulse.177.best/api/compare?base=USD&quote=AUD"
 curl "https://fxpulse.177.best/api/compare?base=AUD&quote=USD"
+curl "https://fxpulse.177.best/api/banks?base=AUD&quote=USD"
+curl "https://fxpulse.177.best/api/history?base=AUD&quote=USD&days=30&sources=market,wise,hsbc_public,bank_boc"
 ```
 
 验收要点：
@@ -117,3 +129,5 @@ curl "https://fxpulse.177.best/api/compare?base=AUD&quote=USD"
 - Wise 与汇丰无需配置 Secret 即可返回数字；
 - 汇丰返回 `basis`，说明使用的 TT 计算口径；
 - 反转页面、计算器、三源对比、走势图和 canonical URL 同步切换。
+- 银行接口返回 18 行，`availableBankCount` 与各行 `status` 一致；汇丰行为 `HSBC Hong Kong` 官方直连，其余行为 `YoYoRate` 公开聚合。
+- 历史接口按 `sources` 返回多个序列；银行数据不足时返回 `unavailable` 和原因，不借用公共市场数据。

@@ -5,10 +5,11 @@ const HSBC_PUBLIC_RATES_ENDPOINT =
   "https://rbwm-api.hsbc.com.hk/digital-pws-tools-investments-eapi-prod-proxy/v1/investments/exchange-rate";
 
 export type ProviderId = "wise" | "hsbc_public";
+export type ArchivedProviderId = ProviderId | `bank_${string}`;
 export type ProviderRateType = "mid_market" | "public_tt_rate";
 
 export interface ProviderRateQuote {
-  provider: ProviderId;
+  provider: ArchivedProviderId;
   base: CurrencyCode;
   quote: CurrencyCode;
   rate: number;
@@ -19,7 +20,7 @@ export interface ProviderRateQuote {
 }
 
 interface ProviderRateRow {
-  provider: ProviderId;
+  provider: ArchivedProviderId;
   base: CurrencyCode;
   quote: CurrencyCode;
   rate: number;
@@ -237,6 +238,29 @@ export async function readLatestProviderQuote(
   return reverse ? rowToQuote(reverse, base, quote, true) : null;
 }
 
+export interface ProviderHistoryPoint {
+  date: string;
+  timestamp: number;
+  rate: number;
+}
+
+export async function readProviderHistory(
+  db: D1Database,
+  provider: ArchivedProviderId,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+  days: number,
+  allowInverse = false,
+  nowEpoch = Math.floor(Date.now() / 1000),
+): Promise<ProviderHistoryPoint[]> {
+  const cutoff = nowEpoch - days * 86_400;
+  const direct = await readProviderHistoryRows(db, provider, base, quote, cutoff);
+  if (direct.length >= 2 || !allowInverse) return historyRowsToPoints(direct, false);
+
+  const reverse = await readProviderHistoryRows(db, provider, quote, base, cutoff);
+  return historyRowsToPoints(reverse, true);
+}
+
 export function percentDifference(rate: number | null, marketRate: number): number | null {
   if (!isPositiveFinite(rate) || !isPositiveFinite(marketRate)) return null;
   return ((rate - marketRate) / marketRate) * 100;
@@ -258,6 +282,41 @@ async function readProviderRow(
     )
     .bind(provider, base, quote)
     .first<ProviderRateRow>();
+}
+
+async function readProviderHistoryRows(
+  db: D1Database,
+  provider: ArchivedProviderId,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+  cutoff: number,
+): Promise<ProviderRateRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json
+       FROM provider_rate_snapshots
+       WHERE provider = ?1 AND base = ?2 AND quote = ?3 AND observed_at >= ?4
+       ORDER BY observed_at ASC`,
+    )
+    .bind(provider, base, quote, cutoff)
+    .all<ProviderRateRow>();
+  return result.results;
+}
+
+function historyRowsToPoints(
+  rows: ProviderRateRow[],
+  invert: boolean,
+): ProviderHistoryPoint[] {
+  return rows.flatMap((row) => {
+    if (!isPositiveFinite(row.rate)) return [];
+    return [
+      {
+        date: new Date(row.observed_at * 1000).toISOString(),
+        timestamp: row.observed_at,
+        rate: invert ? 1 / row.rate : row.rate,
+      },
+    ];
+  });
 }
 
 function rowToQuote(
