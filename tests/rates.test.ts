@@ -155,7 +155,7 @@ describe("search surfaces", () => {
     expect(sitemap).not.toContain("/rates/hkd/hkd");
   });
 
-  it("renders the standalone calculator, pair reversal and three-source comparison", () => {
+  it("renders the standalone calculator, labelled reversal and three-source overview", () => {
     const html = renderPage({
       origin: "https://fxpulse.example",
       base: "AUD",
@@ -177,9 +177,16 @@ describe("search surfaces", () => {
     expect(html).toContain('id="quote-currency"');
     expect(html).toContain('id="converted-amount"');
     expect(html).toContain('id="swap-pair"');
+    expect(html).toContain('id="swap-label">AUD / USD');
+    expect(html).toContain('id="overview-swap"');
+    expect(html).toContain('id="overview-swap-label">USD/AUD');
     expect(html).toContain('id="comparison-grid"');
     expect(html).toContain('data-source="wise"');
     expect(html).toContain('data-source="hsbc_public"');
+    expect(html.match(/data-overview-rate="market"/g)).toHaveLength(10);
+    expect(html.match(/data-overview-rate="wise"/g)).toHaveLength(10);
+    expect(html.match(/data-overview-rate="hsbc_public"/g)).toHaveLength(10);
+    expect(html).toContain("1 AUD 兑换其他币种 · 三源报价");
     expect(html).toContain("金额只用于本计算器");
     expect(html).toContain("汇丰公开牌价（TT）");
   });

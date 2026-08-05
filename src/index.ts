@@ -70,6 +70,10 @@ export default {
       return handleComparison(url, env, ctx);
     }
 
+    if (url.pathname === "/api/overview") {
+      return handleOverview(url, env, ctx);
+    }
+
     if (url.pathname === "/api/history") {
       return handleHistory(url, env);
     }
@@ -276,6 +280,113 @@ async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Prom
   }
 }
 
+async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const rawBase = url.searchParams.get("base") ?? "HKD";
+  if (!isCurrencyCode(rawBase)) return json({ error: "Unsupported base currency" }, 400);
+  const base = normalizeCurrency(rawBase);
+  const targets = CURRENCY_CODES.filter((currency) => currency !== base);
+
+  try {
+    const wisePromise = Promise.all(
+      targets.map((quote) =>
+        fetchWisePair(base, quote).catch((error) => {
+          console.warn(`Wise public overview quote unavailable for ${base}/${quote}`, error);
+          return null;
+        }),
+      ),
+    );
+    const hsbcPromise = collectHsbcPublicQuotes()
+      .then((quotes) => quotes.filter((quote) => quote.base === base))
+      .catch((error) => {
+        console.warn(`HSBC public overview quotes unavailable for ${base}`, error);
+        return [];
+      });
+    const [marketSnapshot, liveWiseQuotes, liveHsbcQuotes] = await Promise.all([
+      fetchCurrentSnapshot(base),
+      wisePromise,
+      hsbcPromise,
+    ]);
+
+    const liveWise = new Map(
+      liveWiseQuotes
+        .filter((quote): quote is ProviderRateQuote => quote !== null)
+        .map((quote) => [quote.quote, quote]),
+    );
+    const liveHsbc = new Map(liveHsbcQuotes.map((quote) => [quote.quote, quote]));
+
+    const missingWise = targets.filter((quote) => !liveWise.has(quote));
+    const missingHsbc = targets.filter((quote) => !liveHsbc.has(quote));
+    const [storedWiseQuotes, storedHsbcQuotes] = await Promise.all([
+      Promise.all(missingWise.map((quote) => safeReadProviderQuote(env.DB, "wise", base, quote))),
+      Promise.all(
+        missingHsbc.map((quote) => safeReadProviderQuote(env.DB, "hsbc_public", base, quote)),
+      ),
+    ]);
+    const storedWise = new Map(
+      storedWiseQuotes
+        .filter((quote): quote is ProviderRateQuote => quote !== null)
+        .map((quote) => [quote.quote, quote]),
+    );
+    const storedHsbc = new Map(
+      storedHsbcQuotes
+        .filter((quote): quote is ProviderRateQuote => quote !== null)
+        .map((quote) => [quote.quote, quote]),
+    );
+
+    const liveQuotes = [...liveWise.values(), ...liveHsbc.values()];
+    if (liveQuotes.length > 0) {
+      ctx.waitUntil(
+        storeProviderQuotes(env.DB, liveQuotes).catch((error) =>
+          console.warn("Overview provider snapshot store failed", error),
+        ),
+      );
+    }
+
+    const pairs = targets.map((quote) => {
+      const marketRate = marketSnapshot.rates[quote];
+      return {
+        quote,
+        direction: `1 ${base} = x ${quote}`,
+        sources: [
+          serializeMarketSource(marketSnapshot, quote),
+          serializeProviderSource(
+            "wise",
+            liveWise.get(quote) ?? storedWise.get(quote) ?? null,
+            marketRate,
+            "Wise",
+            "https://wise.com/gb/currency-converter/",
+            "Wise 公开汇率暂不可用",
+          ),
+          serializeProviderSource(
+            "hsbc_public",
+            liveHsbc.get(quote) ?? storedHsbc.get(quote) ?? null,
+            marketRate,
+            "汇丰 TT",
+            "https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/",
+            "汇丰公开牌价暂不可用",
+          ),
+        ],
+      };
+    });
+
+    return json(
+      {
+        base,
+        unit: 1,
+        sources: ["market", "wise", "hsbc_public"],
+        pairs,
+        interpretation:
+          "每个币种均按同一方向并列公共市场、Wise 与汇丰公开 TT 牌价；汇丰包含买卖价差。",
+      },
+      200,
+      60,
+    );
+  } catch (error) {
+    console.error("Market overview API failed", error);
+    return json({ error: "Market overview is temporarily unavailable" }, 503, 30);
+  }
+}
+
 async function handleHistory(url: URL, env: Env): Promise<Response> {
   const rawBase = url.searchParams.get("base") ?? "HKD";
   const rawQuote = url.searchParams.get("quote") ?? "USD";
@@ -389,6 +500,25 @@ function serializeProviderSource(
     providerUrl,
     reason: ageSeconds <= 1800 ? null : "实时接口暂不可用，当前显示最近一次归档",
     basis: quote.metadata.calculation ?? null,
+  };
+}
+
+function serializeMarketSource(
+  marketSnapshot: Awaited<ReturnType<typeof fetchCurrentSnapshot>>,
+  quote: CurrencyCode,
+): Record<string, unknown> {
+  return {
+    id: "market",
+    label: "公共市场",
+    rateType: "reference",
+    status: "available",
+    rate: marketSnapshot.rates[quote],
+    differenceFromMarketPct: 0,
+    sourceUpdatedAt: new Date(marketSnapshot.sourceUpdatedAt * 1000).toISOString(),
+    observedAt: new Date(marketSnapshot.fetchedAt * 1000).toISOString(),
+    provider: marketSnapshot.provider,
+    providerUrl: marketSnapshot.providerUrl,
+    reason: null,
   };
 }
 

@@ -24,6 +24,7 @@ flowchart TD
 | `/`、`/rates/*` | Worker 服务端生成语义化 HTML | HTML 5 分钟 |
 | `/api/rates` | 返回 11 币种公共市场参考价 | 边缘 5 分钟 |
 | `/api/compare` | 公共市场、Wise、汇丰同方向比较 | 边缘 1 分钟 |
+| `/api/overview` | 一个基准币种对应 10 个目标币种的三源批量报价 | 边缘 1 分钟 |
 | `/api/history` | D1 快照优先，不足时 Frankfurter | 边缘 1 小时 |
 | `/sitemap.xml` | 动态生成全部 110 个有向币种对 | 24 小时 |
 | `/llms.txt` | AI 可读的数据口径说明 | 24 小时 |

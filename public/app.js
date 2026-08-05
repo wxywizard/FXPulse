@@ -20,8 +20,11 @@ const state = {
   days: 30,
   snapshot: initial.snapshot,
   comparison: null,
+  overview: null,
+  overviewError: null,
   historyController: null,
   comparisonController: null,
+  overviewController: null,
 };
 
 const elements = {
@@ -31,8 +34,10 @@ const elements = {
   convertedAmount: document.querySelector("#converted-amount"),
   calculatorRate: document.querySelector("#calculator-rate"),
   swapPair: document.querySelector("#swap-pair"),
+  overviewSwap: document.querySelector("#overview-swap"),
   grid: document.querySelector("#rate-grid"),
   rateError: document.querySelector("#rate-error"),
+  overviewError: document.querySelector("#overview-error"),
   comparisonGrid: document.querySelector("#comparison-grid"),
   comparisonNote: document.querySelector("#comparison-note"),
   chart: document.querySelector("#chart-wrap"),
@@ -51,6 +56,7 @@ function init() {
   }
   loadHistory();
   loadComparison();
+  loadOverview();
 }
 
 function bindEvents() {
@@ -60,10 +66,11 @@ function bindEvents() {
     state.base = nextBase;
     if (state.quote === state.base) state.quote = state.base === "USD" ? "HKD" : "USD";
     state.snapshot = null;
+    state.overview = null;
     updateBaseChrome();
     updatePairChrome();
     updateUrl();
-    await Promise.all([loadCurrentRates(), loadHistory(), loadComparison()]);
+    await Promise.all([loadCurrentRates(), loadHistory(), loadComparison(), loadOverview()]);
   });
 
   elements.amount.addEventListener("input", updateConversion);
@@ -80,16 +87,8 @@ function bindEvents() {
     Promise.all([loadHistory(), loadComparison()]);
   });
 
-  elements.swapPair.addEventListener("click", async () => {
-    const previousBase = state.base;
-    state.base = state.quote;
-    state.quote = previousBase;
-    state.snapshot = null;
-    updateBaseChrome();
-    updatePairChrome();
-    updateUrl();
-    await Promise.all([loadCurrentRates(), loadHistory(), loadComparison()]);
-  });
+  elements.swapPair.addEventListener("click", swapPair);
+  elements.overviewSwap.addEventListener("click", swapPair);
 
   elements.grid.addEventListener("click", (event) => {
     const card = event.target.closest("[data-currency]");
@@ -123,16 +122,34 @@ function bindEvents() {
     const baseChanged = nextBase !== state.base;
     state.base = nextBase;
     state.quote = nextQuote;
-    if (baseChanged) state.snapshot = null;
+    if (baseChanged) {
+      state.snapshot = null;
+      state.overview = null;
+    }
     elements.baseSelect.value = state.base;
     elements.quoteSelect.value = state.quote;
     updateBaseChrome();
     updatePairChrome();
-    if (baseChanged) loadCurrentRates();
+    if (baseChanged) {
+      loadCurrentRates();
+      loadOverview();
+    }
     else updateActiveCard();
     loadHistory();
     loadComparison();
   });
+}
+
+async function swapPair() {
+  const previousBase = state.base;
+  state.base = state.quote;
+  state.quote = previousBase;
+  state.snapshot = null;
+  state.overview = null;
+  updateBaseChrome();
+  updatePairChrome();
+  updateUrl();
+  await Promise.all([loadCurrentRates(), loadHistory(), loadComparison(), loadOverview()]);
 }
 
 async function loadCurrentRates() {
@@ -182,6 +199,34 @@ async function loadComparison() {
   }
 }
 
+async function loadOverview() {
+  if (state.overviewController) state.overviewController.abort();
+  state.overviewController = new AbortController();
+  state.overviewError = null;
+  elements.overviewError.hidden = true;
+  elements.grid.classList.add("provider-loading");
+
+  try {
+    const query = new URLSearchParams({ base: state.base });
+    const response = await fetch(`/api/overview?${query}`, {
+      headers: { accept: "application/json" },
+      signal: state.overviewController.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "三源总览暂时不可用");
+    state.overview = payload;
+    renderRates();
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    state.overviewError = error.message;
+    renderRates();
+    elements.overviewError.textContent = `Wise 与汇丰总览暂时无法加载：${error.message}。公共市场参考价仍可使用。`;
+    elements.overviewError.hidden = false;
+  } finally {
+    elements.grid.classList.remove("provider-loading");
+  }
+}
+
 async function loadHistory() {
   if (state.historyController) state.historyController.abort();
   state.historyController = new AbortController();
@@ -211,19 +256,52 @@ function renderRates() {
   elements.grid.innerHTML = CODES.filter((code) => code !== state.base)
     .map((code) => {
       const meta = CURRENCIES[code];
-      const rate = state.snapshot?.rates?.[code] ?? null;
-      const inverse = rate ? 1 / rate : null;
-      return `<button type="button" class="rate-card ${code === state.quote ? "active" : ""}" data-currency="${code}" aria-label="查看 ${state.base} 兑 ${code} 历史走势">
-        <span class="flag" aria-hidden="true">${meta.flag}</span>
-        <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
-        <span class="rate-value"><strong data-rate>${rate ? formatRate(rate, code) : "—"}</strong><small>1 ${state.base} = <span>${rate ? formatRate(rate, code) : "—"}</span> ${code}</small></span>
-        <span class="inverse">1 ${code} = <b>${inverse ? formatRate(inverse, state.base) : "—"}</b> ${state.base}</span>
-        <span class="card-arrow" aria-hidden="true">↗</span>
+      const pair = state.overview?.pairs?.find((item) => item.quote === code);
+      const sources = new Map((pair?.sources ?? []).map((source) => [source.id, source]));
+      const marketFallback = state.snapshot?.rates?.[code]
+        ? {
+            id: "market",
+            status: "available",
+            rate: state.snapshot.rates[code],
+            differenceFromMarketPct: 0,
+          }
+        : null;
+      return `<button type="button" class="rate-card ${code === state.quote ? "active" : ""}" data-currency="${code}" aria-label="比较 ${state.base} 兑 ${code} 三种来源汇率并查看走势">
+        <span class="rate-card-header">
+          <span class="flag" aria-hidden="true">${meta.flag}</span>
+          <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
+          <span class="pair-direction">1 ${state.base} → ${code}</span>
+          <span class="card-arrow" aria-hidden="true">↗</span>
+        </span>
+        <span class="provider-rate-list">
+          ${renderOverviewSource("market", "公共市场", sources.get("market") ?? marketFallback, code)}
+          ${renderOverviewSource("wise", "Wise", sources.get("wise") ?? null, code)}
+          ${renderOverviewSource("hsbc_public", "汇丰 TT", sources.get("hsbc_public") ?? null, code)}
+        </span>
+        <span class="card-footer">选择 ${code} 查看详细对比与走势 <b>查看</b></span>
       </button>`;
     })
     .join("");
-  document.querySelector("#rates-title").textContent = `1 ${state.base} 的公共市场参考价`;
+  document.querySelector("#rates-title").textContent = `1 ${state.base} 兑换其他币种 · 三源报价`;
   updateConversion();
+}
+
+function renderOverviewSource(id, label, source, quote) {
+  const available = typeof source?.rate === "number" && Number.isFinite(source.rate);
+  const status = source?.status ?? (state.overviewError ? "unavailable" : "loading");
+  let detail = "加载中";
+  if (status === "unavailable") detail = "暂不可用";
+  else if (available && id === "market") detail = "基准";
+  else if (available && typeof source.differenceFromMarketPct === "number") {
+    const difference = source.differenceFromMarketPct;
+    detail = `${difference >= 0 ? "+" : ""}${difference.toFixed(3)}%`;
+  } else if (status === "stale") detail = "最近归档";
+
+  return `<span class="provider-rate provider-${escapeHtml(id)} ${escapeHtml(status)}">
+    <span class="provider-label"><i></i>${escapeHtml(label)}</span>
+    <strong data-overview-rate="${escapeHtml(id)}">${available ? formatRate(source.rate, quote) : "—"}<em>${quote}</em></strong>
+    <small data-overview-diff="${escapeHtml(id)}">${escapeHtml(detail)}</small>
+  </span>`;
 }
 
 function renderComparison(payload) {
@@ -388,6 +466,9 @@ function updatePairChrome() {
   setText("#comparison-unit-quote", state.quote);
   setText("#stat-pair", `${state.quote} / ${state.base}`);
   elements.swapPair.setAttribute("aria-label", `反转 ${state.base}/${state.quote} 为 ${state.quote}/${state.base}`);
+  elements.overviewSwap.setAttribute("aria-label", `反转 ${state.base}/${state.quote} 为 ${state.quote}/${state.base}`);
+  setText("#swap-label", `${state.base} / ${state.quote}`);
+  setText("#overview-swap-label", `${state.quote}/${state.base}`);
   updateActiveCard();
   updateConversion();
 }

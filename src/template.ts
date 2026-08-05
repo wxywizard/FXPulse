@@ -7,7 +7,7 @@ import {
 } from "./currencies";
 import type { CurrentSnapshot } from "./rates";
 
-const ASSET_VERSION = "20260805-live-sources-v2";
+const ASSET_VERSION = "20260805-overview-v3";
 
 interface PageOptions {
   origin: string;
@@ -107,8 +107,9 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
             </span>
           </div>
         </div>
-        <button id="swap-pair" class="swap-button" type="button" aria-label="反转 ${base}/${quote} 为 ${quote}/${base}" title="反转币种方向">
-          <span aria-hidden="true">⇄</span>
+        <button id="swap-pair" class="swap-button" type="button" aria-label="反转 ${base}/${quote} 为 ${quote}/${base}">
+          <span class="swap-icon" aria-hidden="true">⇄</span>
+          <span class="swap-copy"><small>一键反转</small><b id="swap-label">${base} / ${quote}</b></span>
         </button>
         <div class="money-field result-field">
           <label for="quote-currency">预计可得</label>
@@ -139,13 +140,25 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
     </section>
 
     <section id="rates" class="section rates-section" aria-labelledby="rates-title">
-      <div class="section-heading">
+      <div class="section-heading overview-heading">
         <div>
           <span class="section-kicker">MARKET OVERVIEW</span>
-          <h2 id="rates-title">1 ${base} 的公共市场参考价</h2>
+          <h2 id="rates-title">1 ${base} 兑换其他币种 · 三源报价</h2>
         </div>
-        <p id="rates-caption">点击任一币种，查看历史走势</p>
+        <div class="overview-heading-actions">
+          <p id="rates-caption">每张卡片并列公共市场、Wise 与汇丰公开牌价</p>
+          <button id="overview-swap" class="overview-swap" type="button" aria-label="反转 ${base}/${quote} 为 ${quote}/${base}">
+            <span aria-hidden="true">⇄</span>
+            <span>反转为 <b id="overview-swap-label">${quote}/${base}</b></span>
+          </button>
+        </div>
       </div>
+      <div class="overview-legend" aria-label="报价来源图例">
+        <span class="legend-market"><i></i>公共市场</span>
+        <span class="legend-wise"><i></i>Wise 中间价</span>
+        <span class="legend-hsbc"><i></i>汇丰公开 TT</span>
+      </div>
+      <p id="overview-error" class="inline-error" role="alert" hidden></p>
       <div id="rate-grid" class="rate-grid" aria-live="polite">
         ${renderRateCards(base, quote, snapshot)}
       </div>
@@ -255,13 +268,31 @@ function renderRateCards(
     .map((code) => {
       const meta = CURRENCIES[code];
       const rate = snapshot?.rates[code];
-      const inverse = rate ? 1 / rate : null;
-      return `<button type="button" class="rate-card ${code === activeQuote ? "active" : ""}" data-currency="${code}" aria-label="查看 ${base} 兑 ${code} 历史走势">
-        <span class="flag" aria-hidden="true">${meta.flag}</span>
-        <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
-        <span class="rate-value"><strong data-rate>${rate ? formatRate(rate, code) : "—"}</strong><small>1 ${base} = <span data-rate-label>${rate ? formatRate(rate, code) : "—"}</span> ${code}</small></span>
-        <span class="inverse">1 ${code} = <b data-inverse>${inverse ? formatRate(inverse, base) : "—"}</b> ${base}</span>
-        <span class="card-arrow" aria-hidden="true">↗</span>
+      return `<button type="button" class="rate-card ${code === activeQuote ? "active" : ""}" data-currency="${code}" aria-label="比较 ${base} 兑 ${code} 三种来源汇率并查看走势">
+        <span class="rate-card-header">
+          <span class="flag" aria-hidden="true">${meta.flag}</span>
+          <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
+          <span class="pair-direction">1 ${base} → ${code}</span>
+          <span class="card-arrow" aria-hidden="true">↗</span>
+        </span>
+        <span class="provider-rate-list">
+          <span class="provider-rate provider-market available">
+            <span class="provider-label"><i></i>公共市场</span>
+            <strong data-overview-rate="market">${rate ? formatRate(rate, code) : "—"}<em>${code}</em></strong>
+            <small data-overview-diff="market">基准</small>
+          </span>
+          <span class="provider-rate provider-wise loading">
+            <span class="provider-label"><i></i>Wise</span>
+            <strong data-overview-rate="wise">—<em>${code}</em></strong>
+            <small data-overview-diff="wise">加载中</small>
+          </span>
+          <span class="provider-rate provider-hsbc_public loading">
+            <span class="provider-label"><i></i>汇丰 TT</span>
+            <strong data-overview-rate="hsbc_public">—<em>${code}</em></strong>
+            <small data-overview-diff="hsbc_public">加载中</small>
+          </span>
+        </span>
+        <span class="card-footer">选择 ${code} 查看详细对比与走势 <b>查看</b></span>
       </button>`;
     })
     .join("");
