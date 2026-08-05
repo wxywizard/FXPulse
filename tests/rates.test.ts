@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isCurrencyCode, isHistoryWindow, normalizeCurrency } from "../src/currencies";
 import {
   HONG_KONG_BANKS,
+  collectHongKongBankPairs,
   deriveHongKongBankPair,
   parseYoYoRateTtPage,
 } from "../src/bank-rates";
@@ -41,6 +42,30 @@ describe("cross rates", () => {
 });
 
 describe("provider adapters", () => {
+  it("collects all available directed bank pairs from ten currency pages", async () => {
+    const rows = HONG_KONG_BANKS.map(
+      (bank, index) => `<tr>
+        <td><a href="/store/hk/${bank.id}/hkd">${bank.name}</a></td>
+        <td data-selected-rate="${(5 + index * 0.01).toFixed(5)}"></td>
+        <td data-selected-rate="${(5.08 + index * 0.01).toFixed(5)}"></td>
+      </tr>`,
+    ).join("");
+    const requested: string[] = [];
+    const pairs = await collectHongKongBankPairs(async (input) => {
+      requested.push(String(input));
+      return new Response(`<table>${rows}</table>`, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    });
+
+    expect(requested).toHaveLength(10);
+    expect(pairs).toHaveLength(11 * 10 * HONG_KONG_BANKS.length);
+    expect(
+      pairs.filter(({ base, quote }) => base === "USD" && quote === "AUD"),
+    ).toHaveLength(18);
+  });
+
   it("reads directional provider history and only inverts when explicitly allowed", async () => {
     const rows = [
       {

@@ -201,25 +201,28 @@ export async function storeProviderQuotes(
   quotes: ProviderRateQuote[],
 ): Promise<void> {
   if (quotes.length === 0) return;
-  const statements = quotes.map((quote) =>
-    db
-      .prepare(
-        `INSERT OR IGNORE INTO provider_rate_snapshots
-          (provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
-      )
-      .bind(
-        quote.provider,
-        quote.base,
-        quote.quote,
-        quote.rate,
-        quote.rateType,
-        quote.observedAt,
-        quote.sourceUpdatedAt,
-        JSON.stringify(quote.metadata),
-      ),
-  );
-  await db.batch(statements);
+  const batchSize = 100;
+  for (let offset = 0; offset < quotes.length; offset += batchSize) {
+    const statements = quotes.slice(offset, offset + batchSize).map((quote) =>
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO provider_rate_snapshots
+            (provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+        )
+        .bind(
+          quote.provider,
+          quote.base,
+          quote.quote,
+          quote.rate,
+          quote.rateType,
+          quote.observedAt,
+          quote.sourceUpdatedAt,
+          JSON.stringify(quote.metadata),
+        ),
+    );
+    await db.batch(statements);
+  }
 }
 
 export async function readLatestProviderQuote(

@@ -67,7 +67,7 @@ rate_snapshots(
 )
 ```
 
-Wise、汇丰与页面访问过的香港银行币种对保存有方向的来源报价：
+Wise、汇丰与香港银行币种对保存有方向的来源报价：
 
 ```sql
 provider_rate_snapshots(
@@ -83,6 +83,8 @@ provider_rate_snapshots(
 ```
 
 Wise 归档允许在缺少同方向数据时取倒数；汇丰和其他银行归档只读取完全匹配的方向，绝不把 TT 反向价简单倒数。历史接口通过 `sources=market,wise,hsbc_public,bank_boc...` 返回多个独立序列；只有公共市场允许 Frankfurter 冷启动，银行历史不足时返回明确不可用状态。
+
+银行定时采集每小时只读取 10 个非 HKD 公开牌价页，然后在 Worker 内存中推导 18 家银行全部可用方向；D1 以每批最多 100 条写入，避免为 110 个币种方向重复请求上游。
 
 ## 数据可信度与降级
 

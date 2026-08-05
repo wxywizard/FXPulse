@@ -29,6 +29,7 @@ import {
 } from "./provider-rates";
 import {
   HONG_KONG_BANKS,
+  collectHongKongBankPairs,
   compareBankQuotes,
   fetchHongKongBankPair,
   type HongKongBankQuote,
@@ -142,22 +143,46 @@ export default {
           currencies: CURRENCY_CODES.length,
         });
 
-        const hsbcQuotes = await collectHsbcPublicQuotes().catch((error) => {
-          console.warn("HSBC public snapshot collection skipped", error);
-          return [];
-        });
-        const wiseQuotes =
-          new Date(controller.scheduledTime).getUTCMinutes() === 0
-            ? await collectWiseUsdQuotes().catch((error) => {
+        const hourly = new Date(controller.scheduledTime).getUTCMinutes() === 0;
+        const [hsbcQuotes, wiseQuotes, bankPairs] = await Promise.all([
+          collectHsbcPublicQuotes().catch((error) => {
+            console.warn("HSBC public snapshot collection skipped", error);
+            return [];
+          }),
+          hourly
+            ? collectWiseUsdQuotes().catch((error) => {
                 console.warn("Wise public snapshot collection skipped", error);
                 return [];
               })
-            : [];
+            : Promise.resolve([]),
+          hourly
+            ? collectHongKongBankPairs().catch((error) => {
+                console.warn("Hong Kong bank snapshot collection skipped", error);
+                return [];
+              })
+            : Promise.resolve([]),
+        ]);
+        const bankObservedAt = Math.floor(controller.scheduledTime / 3_600_000) * 3_600;
+        const bankQuotes: ProviderRateQuote[] = bankPairs.map(({ base, quote, bank }) => ({
+          provider: bankProviderId(bank.id),
+          base,
+          quote,
+          rate: bank.rate as number,
+          rateType: "public_tt_rate",
+          observedAt: bankObservedAt,
+          sourceUpdatedAt: bank.observedAt ?? bankObservedAt,
+          metadata: {
+            bankName: bank.name,
+            calculation: bank.basis,
+            source: bank.source,
+          },
+        }));
         try {
-          await storeProviderQuotes(env.DB, [...hsbcQuotes, ...wiseQuotes]);
+          await storeProviderQuotes(env.DB, [...hsbcQuotes, ...wiseQuotes, ...bankQuotes]);
           console.log("Stored provider snapshots", {
             hsbc: hsbcQuotes.length,
             wise: wiseQuotes.length,
+            banks: bankQuotes.length,
           });
         } catch (error) {
           console.warn("Provider snapshot storage skipped", error);

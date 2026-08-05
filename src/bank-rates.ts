@@ -1,6 +1,10 @@
-import type { CurrencyCode } from "./currencies";
+import { CURRENCY_CODES, type CurrencyCode } from "./currencies";
 
 const YOYO_RATE_BASE_URL = "https://yoyorate.com/compare/hk/hkd-to-";
+const ALL_SUPPORTED_CURRENCIES = CURRENCY_CODES;
+const ALL_BANK_CURRENCIES = CURRENCY_CODES.filter(
+  (currency): currency is Exclude<CurrencyCode, "HKD"> => currency !== "HKD",
+);
 
 export const HONG_KONG_BANKS = [
   { id: "boc", name: "中银香港", englishName: "Bank of China (Hong Kong)" },
@@ -48,6 +52,12 @@ export interface HongKongBankQuote {
   reason: string | null;
   baseTtBuyHkd: number | null;
   quoteTtSellHkd: number | null;
+}
+
+export interface ArchivedHongKongBankPair {
+  base: CurrencyCode;
+  quote: CurrencyCode;
+  bank: HongKongBankQuote;
 }
 
 const BANK_BY_ID = new Map(HONG_KONG_BANKS.map((bank) => [bank.id, bank] as const));
@@ -139,6 +149,39 @@ export async function fetchHongKongBankPair(
   }).sort(compareBankQuotes);
 
   return { banks, warnings };
+}
+
+export async function collectHongKongBankPairs(
+  fetcher: typeof fetch = fetch,
+): Promise<ArchivedHongKongBankPair[]> {
+  const currencies = ALL_BANK_CURRENCIES;
+  const legResults = await Promise.all(
+    currencies.map((currency) => fetchHongKongBankLegs(currency, fetcher)),
+  );
+  const legs = new Map(
+    currencies.map((currency, index) => [currency, legResults[index]] as const),
+  );
+  const pairs: ArchivedHongKongBankPair[] = [];
+
+  for (const base of ALL_SUPPORTED_CURRENCIES) {
+    for (const quote of ALL_SUPPORTED_CURRENCIES) {
+      if (base === quote) continue;
+      for (const bank of HONG_KONG_BANKS) {
+        const baseLeg = base === "HKD" ? null : legs.get(base)?.get(bank.id) ?? null;
+        const quoteLeg = quote === "HKD" ? null : legs.get(quote)?.get(bank.id) ?? null;
+        const derived = deriveHongKongBankPair(
+          bank,
+          base,
+          quote,
+          baseLeg,
+          quoteLeg,
+          Number.NaN,
+        );
+        if (derived.rate !== null) pairs.push({ base, quote, bank: derived });
+      }
+    }
+  }
+  return pairs;
 }
 
 export function deriveHongKongBankPair(
