@@ -317,11 +317,22 @@ async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Prom
   }
 }
 
-async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
+export async function handleOverview(
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const rawBase = url.searchParams.get("base") ?? "HKD";
   if (!isCurrencyCode(rawBase)) return json({ error: "Unsupported base currency" }, 400);
   const base = normalizeCurrency(rawBase);
   const targets = CURRENCY_CODES.filter((currency) => currency !== base);
+  const requestedExtras = parseOverviewSourceIds(url);
+  if (requestedExtras instanceof Response) return requestedExtras;
+  const wantsHsbc = requestedExtras.includes("hsbc_public");
+  const requestedBankIds = requestedExtras.flatMap((id) => {
+    const bankId = id.match(/^bank_([a-z0-9]+)$/)?.[1];
+    return bankId ? [bankId] : [];
+  });
 
   try {
     const wisePromise = Promise.all(
@@ -332,16 +343,25 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
         }),
       ),
     );
-    const hsbcPromise = collectHsbcPublicQuotes()
-      .then((quotes) => quotes.filter((quote) => quote.base === base))
-      .catch((error) => {
-        console.warn(`HSBC public overview quotes unavailable for ${base}`, error);
-        return [];
-      });
-    const [marketSnapshot, liveWiseQuotes, liveHsbcQuotes] = await Promise.all([
+    const hsbcPromise = wantsHsbc
+      ? collectHsbcPublicQuotes()
+          .then((quotes) => quotes.filter((quote) => quote.base === base))
+          .catch((error) => {
+            console.warn(`HSBC public overview quotes unavailable for ${base}`, error);
+            return [];
+          })
+      : Promise.resolve([]);
+    const bankPromise = requestedBankIds.length
+      ? collectHongKongBankPairs().catch((error) => {
+          console.warn(`Hong Kong bank overview quotes unavailable for ${base}`, error);
+          return [];
+        })
+      : Promise.resolve([]);
+    const [marketSnapshot, liveWiseQuotes, liveHsbcQuotes, liveBankPairs] = await Promise.all([
       fetchCurrentSnapshot(base),
       wisePromise,
       hsbcPromise,
+      bankPromise,
     ]);
 
     const liveWise = new Map(
@@ -350,13 +370,49 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
         .map((quote) => [quote.quote, quote]),
     );
     const liveHsbc = new Map(liveHsbcQuotes.map((quote) => [quote.quote, quote]));
+    const liveBankQuotes = liveBankPairs
+      .filter(
+        (pair) =>
+          pair.base === base &&
+          requestedBankIds.includes(pair.bank.id) &&
+          typeof pair.bank.rate === "number",
+      )
+      .map(({ quote, bank }) => ({
+        provider: bankProviderId(bank.id),
+        base,
+        quote,
+        rate: bank.rate as number,
+        rateType: "public_tt_rate" as const,
+        observedAt: bank.observedAt ?? Math.floor(Date.now() / 1000),
+        sourceUpdatedAt: bank.observedAt ?? Math.floor(Date.now() / 1000),
+        metadata: {
+          bankName: bank.name,
+          calculation: bank.basis,
+          source: bank.source,
+          sourceUrl: bank.sourceUrl,
+        },
+      }));
+    const liveBanks = new Map(
+      liveBankQuotes.map((quote) => [`${quote.provider}:${quote.quote}`, quote] as const),
+    );
 
     const missingWise = targets.filter((quote) => !liveWise.has(quote));
-    const missingHsbc = targets.filter((quote) => !liveHsbc.has(quote));
-    const [storedWiseQuotes, storedHsbcQuotes] = await Promise.all([
+    const missingHsbc = wantsHsbc ? targets.filter((quote) => !liveHsbc.has(quote)) : [];
+    const missingBankKeys = requestedBankIds.flatMap((bankId) =>
+      targets.flatMap((quote) => {
+        const provider = bankProviderId(bankId);
+        return liveBanks.has(`${provider}:${quote}`) ? [] : [{ provider, quote }];
+      }),
+    );
+    const [storedWiseQuotes, storedHsbcQuotes, storedBankQuotes] = await Promise.all([
       Promise.all(missingWise.map((quote) => safeReadProviderQuote(env.DB, "wise", base, quote))),
       Promise.all(
         missingHsbc.map((quote) => safeReadProviderQuote(env.DB, "hsbc_public", base, quote)),
+      ),
+      Promise.all(
+        missingBankKeys.map(({ provider, quote }) =>
+          safeReadProviderQuote(env.DB, provider, base, quote),
+        ),
       ),
     ]);
     const storedWise = new Map(
@@ -369,8 +425,13 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
         .filter((quote): quote is ProviderRateQuote => quote !== null)
         .map((quote) => [quote.quote, quote]),
     );
+    const storedBanks = new Map(
+      storedBankQuotes
+        .filter((quote): quote is ProviderRateQuote => quote !== null)
+        .map((quote) => [`${quote.provider}:${quote.quote}`, quote] as const),
+    );
 
-    const liveQuotes = [...liveWise.values(), ...liveHsbc.values()];
+    const liveQuotes = [...liveWise.values(), ...liveHsbc.values(), ...liveBankQuotes];
     if (liveQuotes.length > 0) {
       ctx.waitUntil(
         storeProviderQuotes(env.DB, liveQuotes).catch((error) =>
@@ -394,14 +455,29 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
             "https://wise.com/gb/currency-converter/",
             "Wise 公开汇率暂不可用",
           ),
-          serializeProviderSource(
-            "hsbc_public",
-            liveHsbc.get(quote) ?? storedHsbc.get(quote) ?? null,
-            marketRate,
-            "汇丰 TT",
-            "https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/",
-            "汇丰公开牌价暂不可用",
-          ),
+          ...requestedExtras.map((sourceId) => {
+            if (sourceId === "hsbc_public") {
+              return serializeProviderSource(
+                "hsbc_public",
+                liveHsbc.get(quote) ?? storedHsbc.get(quote) ?? null,
+                marketRate,
+                "汇丰 TT",
+                "https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/",
+                "汇丰公开牌价暂不可用",
+              );
+            }
+            const bankId = sourceId.match(/^bank_([a-z0-9]+)$/)?.[1] ?? "";
+            const bank = HONG_KONG_BANKS.find((item) => item.id === bankId);
+            const provider = bankProviderId(bankId);
+            return serializeBankOverviewSource(
+              sourceId,
+              bank?.name ?? sourceId,
+              liveBanks.get(`${provider}:${quote}`) ??
+                storedBanks.get(`${provider}:${quote}`) ??
+                null,
+              marketRate,
+            );
+          }),
         ],
       };
     });
@@ -410,10 +486,10 @@ async function handleOverview(url: URL, env: Env, ctx: ExecutionContext): Promis
       {
         base,
         unit: 1,
-        sources: ["market", "wise", "hsbc_public"],
+        sources: ["market", "wise", ...requestedExtras],
         pairs,
         interpretation:
-          "每个币种均按同一方向并列公共市场、Wise 与汇丰公开 TT 牌价；汇丰包含买卖价差。",
+          "公共市场和 Wise 为固定来源；附加来源由全局或单卡片配置决定，银行 TT 报价包含买卖价差。",
       },
       200,
       60,
@@ -517,7 +593,7 @@ async function handleBankComparison(
         source: {
           provider: "YoYoRate",
           providerUrl: "https://yoyorate.com/",
-          note: "聚合香港银行公开电汇买卖价；汇丰一行由汇丰香港官方公开接口校准。",
+          note: "聚合香港银行公开电汇买卖价；汇丰一行由汇丰香港官方公开接口校准。仅收录无需登录且具有可靠匿名来源的报价，登录后专属报价不会进入配置。",
         },
         interpretation: `全部银行统一按“卖出 ${base}、买入 ${quote}”计算；外币交叉盘使用 BASE TT 买入 ÷ QUOTE TT 卖出，因此反向不会简单互为倒数。数值越高，表示 1 ${base} 可换得的 ${quote} 越多。`,
       },
@@ -720,9 +796,31 @@ function parseApiPair(url: URL): { base: CurrencyCode; quote: CurrencyCode } | R
   return { base, quote };
 }
 
+export function parseOverviewSourceIds(url: URL): string[] | Response {
+  const ids = [
+    ...new Set(
+      (url.searchParams.get("sources") ?? "")
+        .split(",")
+        .map((source) => source.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (ids.length > HONG_KONG_BANKS.length) {
+    return json({ error: "Too many overview sources" }, 400);
+  }
+  for (const id of ids) {
+    if (id === "hsbc_public") continue;
+    const bankId = id.match(/^bank_([a-z0-9]+)$/)?.[1];
+    if (!bankId || bankId === "hsbc" || !HONG_KONG_BANKS.some((bank) => bank.id === bankId)) {
+      return json({ error: "Unsupported overview source" }, 400);
+    }
+  }
+  return ids;
+}
+
 async function safeReadProviderQuote(
   db: D1Database,
-  provider: ProviderId,
+  provider: ArchivedProviderId,
   base: CurrencyCode,
   quote: CurrencyCode,
 ): Promise<ProviderRateQuote | null> {
@@ -732,6 +830,49 @@ async function safeReadProviderQuote(
     console.warn(`Stored ${provider} quote unavailable`, error);
     return null;
   }
+}
+
+function serializeBankOverviewSource(
+  id: string,
+  label: string,
+  quote: ProviderRateQuote | null,
+  marketRate: number,
+): Record<string, unknown> {
+  if (!quote) {
+    return {
+      id,
+      label,
+      rateType: "public_tt_rate",
+      status: "unavailable",
+      rate: null,
+      differenceFromMarketPct: null,
+      sourceUpdatedAt: null,
+      observedAt: null,
+      provider: "Hong Kong bank public TT aggregation",
+      providerUrl: "https://yoyorate.com/",
+      reason: "当前币种方向没有可验证的完整 TT 买入及卖出价",
+      basis: null,
+    };
+  }
+
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - quote.observedAt);
+  const sourceUrl = typeof quote.metadata.sourceUrl === "string"
+    ? quote.metadata.sourceUrl
+    : "https://yoyorate.com/";
+  return {
+    id,
+    label,
+    rateType: quote.rateType,
+    status: ageSeconds <= 7_200 ? "available" : "stale",
+    rate: quote.rate,
+    differenceFromMarketPct: percentDifference(quote.rate, marketRate),
+    sourceUpdatedAt: new Date(quote.sourceUpdatedAt * 1000).toISOString(),
+    observedAt: new Date(quote.observedAt * 1000).toISOString(),
+    provider: String(quote.metadata.source ?? "YoYoRate"),
+    providerUrl: sourceUrl,
+    reason: ageSeconds <= 7_200 ? null : "实时聚合暂不可用，当前显示最近一次归档",
+    basis: quote.metadata.calculation ?? null,
+  };
 }
 
 function serializeProviderSource(

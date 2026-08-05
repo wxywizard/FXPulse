@@ -227,7 +227,7 @@ export async function storeProviderQuotes(
 
 export async function readLatestProviderQuote(
   db: D1Database,
-  provider: ProviderId,
+  provider: ArchivedProviderId,
   base: CurrencyCode,
   quote: CurrencyCode,
 ): Promise<ProviderRateQuote | null> {
@@ -271,7 +271,7 @@ export function percentDifference(rate: number | null, marketRate: number): numb
 
 async function readProviderRow(
   db: D1Database,
-  provider: ProviderId,
+  provider: ArchivedProviderId,
   base: CurrencyCode,
   quote: CurrencyCode,
 ): Promise<ProviderRateRow | null> {

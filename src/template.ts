@@ -8,7 +8,7 @@ import {
 import type { CurrentSnapshot } from "./rates";
 import { HONG_KONG_BANKS } from "./bank-rates";
 
-const ASSET_VERSION = "20260805-controls-v2";
+const ASSET_VERSION = "20260805-overview-config-v1";
 
 interface PageOptions {
   origin: string;
@@ -23,9 +23,15 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   const canonicalPath = `/rates/${base.toLowerCase()}/${quote.toLowerCase()}`;
   const canonical = `${origin}${canonicalPath}`;
   const title = `${base}/${quote} 汇率与历史走势｜FXPulse`;
-  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise、汇丰及 18 家香港银行公开 TT 牌价，并查看 7、15、30、90、365 天走势。`;
+  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise 与当前已接入的 18 家香港银行公开 TT 牌价，并查看 7、15、30、90、365 天走势。`;
   const initialData = escapeScriptJson(
-    JSON.stringify({ base, quote, snapshot, generatedAt: new Date().toISOString() }),
+    JSON.stringify({
+      base,
+      quote,
+      snapshot,
+      sourceCatalog: overviewSourceCatalog(),
+      generatedAt: new Date().toISOString(),
+    }),
   );
   const updatedText = snapshot
     ? new Date(snapshot.sourceUpdatedAt * 1000).toLocaleString("zh-CN", {
@@ -70,8 +76,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <span>FX<span>Pulse</span></span>
     </a>
     <nav aria-label="主要导航">
-      <a href="#compare">三源对比</a>
-      <a href="#banks">银行牌价</a>
+      <a href="#banks">来源对比</a>
       <a href="#rates">币种总览</a>
       <a href="#trend">趋势</a>
       <a href="#methodology">数据说明</a>
@@ -83,7 +88,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
     <section class="hero" aria-labelledby="hero-title">
       <div class="eyebrow"><span>FX</span> 为香港外币用户而做</div>
       <h1 id="hero-title">外汇变化，<em>一眼看清。</em></h1>
-      <p>同一币种方向，对比公共市场、Wise、汇丰官方牌价与 18 家香港银行 TT 汇率，再结合近期走势判断差异。</p>
+      <p>同一币种方向，对比公共市场、Wise 与当前已接入的 18 家香港银行 TT 汇率；汇丰一行使用官网匿名接口校准。</p>
       <div class="hero-meta">
         <span><b id="status-dot" class="status-dot ${snapshot ? "" : "pending"}"></b><span id="data-status">${snapshot ? "数据源正常" : "正在连接数据源"}</span></span>
         <span>提供方更新：<time id="source-updated">${updatedText}</time> HKT</span>
@@ -136,38 +141,24 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <p class="calculator-rate"><span id="calculator-rate-source">公共市场参考价</span> · <span id="calculator-rate">1 ${base} = — ${quote}</span></p>
     </section>
 
-    <section id="compare" class="section comparison-section" aria-labelledby="comparison-title">
-      <div class="section-heading">
-        <div>
-          <span class="section-kicker">SAME PAIR · THREE SOURCES</span>
-          <h2 id="comparison-title"><span id="comparison-base">${base}</span>/<span id="comparison-quote">${quote}</span> 三源对比</h2>
-        </div>
-        <p>统一按 1 <span id="comparison-unit-base">${base}</span> 兑换 <span id="comparison-unit-quote">${quote}</span> 展示</p>
-      </div>
-      <div id="comparison-grid" class="comparison-grid" aria-live="polite">
-        ${renderComparisonPlaceholders(base, quote)}
-      </div>
-      <p id="comparison-note" class="comparison-note">正在加载各来源的可用报价与更新时间。</p>
-    </section>
-
     <section id="banks" class="section bank-section" aria-labelledby="banks-title">
       <div class="section-heading bank-heading">
         <div>
-          <span class="section-kicker">HONG KONG BANK TT RATES</span>
-          <h2 id="banks-title"><span id="banks-base">${base}</span>/<span id="banks-quote">${quote}</span> 香港银行牌价</h2>
+          <span class="section-kicker">ALL CONNECTED RATE SOURCES</span>
+          <h2 id="banks-title"><span id="banks-base">${base}</span>/<span id="banks-quote">${quote}</span> 汇率来源对比</h2>
         </div>
-        <p>按客户卖出 <span id="banks-sell">${base}</span>、买入 <span id="banks-buy">${quote}</span> 的实际方向排序</p>
+        <p>公共市场与 Wise 固定置顶，银行按客户卖出 <span id="banks-sell">${base}</span>、买入 <span id="banks-buy">${quote}</span> 排序</p>
       </div>
       <div class="bank-summary" aria-live="polite">
         <div><span>当前方向</span><strong id="bank-direction">卖出 ${base} → 买入 ${quote}</strong></div>
-        <div><span>最佳可得</span><strong id="bank-best">正在加载</strong></div>
+        <div><span>最佳银行牌价</span><strong id="bank-best">正在加载</strong></div>
         <div><span>可用银行</span><strong id="bank-available">— / 18</strong></div>
       </div>
       <p id="bank-error" class="inline-error" role="alert" hidden></p>
       <div class="bank-table-wrap">
         <table class="bank-table">
           <thead>
-            <tr><th>排名</th><th>银行</th><th id="bank-rate-column">1 ${base} 可得 ${quote}</th><th>较市场价</th><th>TT 计算口径</th><th>采集时间</th></tr>
+            <tr><th>排名</th><th>来源</th><th>类型</th><th id="bank-rate-column">1 ${base} 可得 ${quote}</th><th>较市场价</th><th>报价口径</th><th>采集时间</th></tr>
           </thead>
           <tbody id="bank-table-body">
             ${renderBankPlaceholders()}
@@ -175,7 +166,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
         </table>
       </div>
       <div class="bank-table-note">
-        <p id="bank-note">正在读取公开电汇买卖价。数值越高，代表同样 1 ${base} 可换得更多 ${quote}。</p>
+        <p id="bank-note">正在读取公共市场、Wise 与公开银行牌价。数值越高，代表同样 1 ${base} 可换得更多 ${quote}。</p>
         <a href="https://yoyorate.com/" target="_blank" rel="noopener noreferrer">查看聚合来源 <span aria-hidden="true">↗</span></a>
       </div>
     </section>
@@ -184,20 +175,32 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <div class="section-heading overview-heading">
         <div>
           <span class="section-kicker">MARKET OVERVIEW</span>
-          <h2 id="rates-title">1 ${base} 兑换其他币种 · 三源报价</h2>
+          <h2 id="rates-title">1 ${base} 兑换其他币种 · 可配置多源报价</h2>
         </div>
         <div class="overview-heading-actions">
-          <p id="rates-caption">每张卡片并列公共市场、Wise 与汇丰公开牌价</p>
+          <p id="rates-caption">公共市场和 Wise 默认展示；全局最多增加 5 个来源，每张卡可独立覆盖</p>
           <button id="overview-swap" class="overview-swap" type="button" aria-label="反转 ${base}/${quote} 为 ${quote}/${base}">
             <span aria-hidden="true">⇄</span>
             <span>反转为 <b id="overview-swap-label">${quote}/${base}</b></span>
           </button>
         </div>
       </div>
-      <div class="overview-legend" aria-label="报价来源图例">
-        <span class="legend-market"><i></i>公共市场</span>
-        <span class="legend-wise"><i></i>Wise 中间价</span>
-        <span class="legend-hsbc"><i></i>汇丰公开 TT</span>
+      <div class="overview-config-row">
+        <div id="overview-legend" class="overview-legend" aria-label="全局报价来源图例">
+          <span class="legend-market"><i></i>公共市场</span>
+          <span class="legend-wise"><i></i>Wise 中间价</span>
+        </div>
+        <details id="overview-global-config" class="overview-source-config">
+          <summary>配置全局来源 <b id="overview-global-count">0 / 5</b></summary>
+          <div class="overview-config-panel">
+            <strong>附加数据源（最多 5 个）</strong>
+            <p>公共市场和 Wise 始终展示，不占 5 个附加名额。</p>
+            <div id="overview-global-options" class="overview-config-options">
+              ${overviewSourceCheckboxes("global")}
+            </div>
+            <small id="overview-global-note">当前使用默认配置。</small>
+          </div>
+        </details>
       </div>
       <p id="overview-error" class="inline-error" role="alert" hidden></p>
       <div id="rate-grid" class="rate-grid" aria-live="polite">
@@ -232,12 +235,12 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
             ${historySourceCheckbox("hsbc_public", "汇丰公开 TT")}
           </div>
           <details class="chart-bank-picker">
-            <summary>香港银行 <b id="chart-bank-count">0</b> / ${HONG_KONG_BANKS.length}</summary>
+            <summary>其他香港银行 <b id="chart-bank-count">0</b> / ${HONG_KONG_BANKS.length - 1}</summary>
             <div class="chart-bank-options">
-              ${HONG_KONG_BANKS.map((bank) => historySourceCheckbox(`bank_${bank.id}`, bank.name)).join("")}
+              ${HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc").map((bank) => historySourceCheckbox(`bank_${bank.id}`, bank.name)).join("")}
             </div>
           </details>
-          <p id="chart-selection-note">已选择 1 个数据源。银行历史仅使用 FXPulse 真实归档，数据不足时会明确标注。</p>
+          <p id="chart-selection-note">已选择 1 个数据源。柱状图按香港日期共用一个柱位并以颜色叠层区分；银行历史不足时会明确标注。</p>
         </div>
         <div id="chart-legend" class="chart-legend" aria-live="polite"></div>
         <div id="chart-wrap" class="chart-wrap" aria-live="polite">
@@ -267,7 +270,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <div>
         <span class="section-kicker">CLEAR BY DESIGN</span>
         <h2 id="method-title">先看清数据，再做决定。</h2>
-        <p>公共市场价用于建立统一基准；Wise 读取公开中间价；汇丰读取香港官网 TT 牌价；其他香港银行通过公开聚合页读取 TT Buy / TT Sell，并按同一兑换方向经 HKD 计算交叉汇率。</p>
+        <p>公共市场价用于建立统一基准；Wise 读取公开中间价；汇丰读取香港官网 TT 牌价；其他已接入香港银行通过公开聚合页读取 TT Buy / TT Sell，并按同一兑换方向经 HKD 计算交叉汇率。仅能登录后查看或没有可靠第三方实时来源的银行不会接入。</p>
       </div>
       <div class="method-grid">
         <article><span>01</span><h3>同方向再比较</h3><p>切换或反转币种后，所有来源统一换算为“1 基准币种 = x 目标币种”。</p></article>
@@ -305,29 +308,13 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
 </html>`;
 }
 
-function renderComparisonPlaceholders(base: CurrencyCode, quote: CurrencyCode): string {
-  return [
-    ["公共市场参考价", "market"],
-    ["Wise 公开中间价", "wise"],
-    ["汇丰公开牌价（TT）", "hsbc_public"],
-  ]
-    .map(
-      ([label, id]) => `<article class="source-card loading" data-source="${id}">
-        <div class="source-card-head"><span>${label}</span><b>连接中</b></div>
-        <strong>1 ${base} = — ${quote}</strong>
-        <p>正在确认该来源的报价状态</p>
-        <small>更新时间：—</small>
-      </article>`,
-    )
-    .join("");
-}
-
 function renderBankPlaceholders(): string {
   return Array.from(
     { length: 6 },
     (_, index) => `<tr class="bank-row bank-row-loading">
       <td class="bank-rank">${index + 1}</td>
       <td class="bank-name"><strong>银行牌价加载中</strong><small>正在确认可用币种</small></td>
+      <td class="bank-type">银行 TT</td>
       <td class="bank-rate">—</td>
       <td class="bank-diff">—</td>
       <td class="bank-basis">—</td>
@@ -352,7 +339,8 @@ function renderRateCards(
     .map((code) => {
       const meta = CURRENCIES[code];
       const rate = snapshot?.rates[code];
-      return `<button type="button" class="rate-card ${code === activeQuote ? "active" : ""}" data-currency="${code}" aria-label="比较 ${base} 兑 ${code} 三种来源汇率并查看走势">
+      return `<article class="rate-card ${code === activeQuote ? "active" : ""}" data-currency="${code}">
+        <button type="button" class="rate-card-select" data-select-currency aria-label="比较 ${base} 兑 ${code} 多来源汇率并查看走势">
         <span class="rate-card-header">
           <span class="flag" aria-hidden="true">${meta.flag}</span>
           <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
@@ -370,14 +358,11 @@ function renderRateCards(
             <strong data-overview-rate="wise">—<em>${code}</em></strong>
             <small data-overview-diff="wise">加载中</small>
           </span>
-          <span class="provider-rate provider-hsbc_public loading">
-            <span class="provider-label"><i></i>汇丰 TT</span>
-            <strong data-overview-rate="hsbc_public">—<em>${code}</em></strong>
-            <small data-overview-diff="hsbc_public">加载中</small>
-          </span>
         </span>
         <span class="card-footer">选择 ${code} 查看详细对比与走势 <b>查看</b></span>
-      </button>`;
+        </button>
+        ${renderCardSourceConfig(code)}
+      </article>`;
     })
     .join("");
 }
@@ -396,8 +381,37 @@ function calculatorSourceOptions(): string {
     <option value="hsbc_public">汇丰公开 TT</option>
   </optgroup>
   <optgroup label="香港银行公开 TT">
-    ${HONG_KONG_BANKS.map((bank) => `<option value="bank_${bank.id}">${bank.name}</option>`).join("")}
+    ${HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc").map((bank) => `<option value="bank_${bank.id}">${bank.name}</option>`).join("")}
   </optgroup>`;
+}
+
+function overviewSourceCatalog(): Array<{ id: string; label: string; group: string }> {
+  return [
+    { id: "hsbc_public", label: "汇丰公开 TT", group: "官方公开牌价" },
+    ...HONG_KONG_BANKS.filter((bank) => bank.id !== "hsbc").map((bank) => ({
+      id: `bank_${bank.id}`,
+      label: bank.name,
+      group: "香港银行公开 TT",
+    })),
+  ];
+}
+
+function overviewSourceCheckboxes(scope: "global" | "card"): string {
+  return overviewSourceCatalog()
+    .map((source) => `<label class="overview-source-option"><input type="checkbox" value="${source.id}" data-overview-${scope}-source ${scope === "card" ? "disabled" : ""}><span><i></i>${source.label}</span></label>`)
+    .join("");
+}
+
+function renderCardSourceConfig(code: CurrencyCode): string {
+  return `<details class="card-source-config" data-card-source-config>
+    <summary>卡片数据源 <b data-card-source-mode>跟随全局</b></summary>
+    <div class="card-config-panel">
+      <label class="card-follow-option"><input type="checkbox" data-card-follow-global checked><span>跟随全局配置</span></label>
+      <p>取消跟随后，可为 ${code} 单独选择最多 5 个附加来源。</p>
+      <div class="overview-config-options card-config-options">${overviewSourceCheckboxes("card")}</div>
+      <div class="card-config-footer"><small data-card-config-note>当前跟随全局配置。</small><button type="button" data-card-config-reset>恢复全局</button></div>
+    </div>
+  </details>`;
 }
 
 function historySourceCheckbox(id: string, label: string, checked = false): string {
@@ -421,7 +435,7 @@ function renderStructuredData(input: {
         url: input.origin,
         applicationCategory: "FinanceApplication",
         operatingSystem: "Web",
-        description: "公共市场、Wise、汇丰及 18 家香港银行公开 TT 牌价比较与历史趋势工具",
+        description: "公共市场、Wise 与当前已接入 18 家香港银行公开 TT 牌价的比较及历史趋势工具",
         inLanguage: "zh-Hans",
         offers: { "@type": "Offer", price: "0", priceCurrency: "HKD" },
       },
@@ -453,7 +467,7 @@ function renderStructuredData(input: {
             name: "汇率数据多久更新一次？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "页面访问时实时读取三项来源并显示各自更新时间；Cloudflare Cron 每 15 分钟归档公共市场与汇丰牌价，Wise 每小时归档一次作为故障降级。",
+              text: "页面按配置读取匿名公开来源并显示各自更新时间；Cloudflare Cron 定时归档公共市场、Wise、汇丰及当前已接入银行报价作为历史与故障降级。",
             },
           },
           {
@@ -461,7 +475,7 @@ function renderStructuredData(input: {
             name: "FXPulse 包含哪些香港银行牌价？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "银行列表覆盖 18 家公开发布电汇买卖价的香港零售银行。所有银行统一按客户卖出基准币种、买入目标币种计算；外币交叉盘经 HKD 换算并保留买卖价差。",
+              text: "银行列表覆盖当前可从匿名公开来源取得同口径电汇买卖价的 18 家香港零售银行。需要登录且没有可靠第三方实时源的银行不接入。所有银行统一按客户卖出基准币种、买入目标币种计算。",
             },
           },
         ],

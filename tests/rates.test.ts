@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { isCurrencyCode, isHistoryWindow, normalizeCurrency } from "../src/currencies";
+import { describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vite exposes public assets as raw strings to the test runner.
+import appScript from "../public/app.js?raw";
+import {
+  CURRENCY_CODES,
+  isCurrencyCode,
+  isHistoryWindow,
+  normalizeCurrency,
+} from "../src/currencies";
 import {
   HONG_KONG_BANKS,
   collectHongKongBankPairs,
@@ -14,7 +21,7 @@ import {
   readProviderHistory,
 } from "../src/provider-rates";
 import { renderPage, renderSitemap } from "../src/template";
-import { handleHistory } from "../src/index";
+import { handleHistory, handleOverview, parseOverviewSourceIds } from "../src/index";
 
 describe("currency validation", () => {
   it("accepts supported codes case-insensitively", () => {
@@ -26,6 +33,201 @@ describe("currency validation", () => {
   it("limits supported history windows", () => {
     expect(isHistoryWindow(15)).toBe(true);
     expect(isHistoryWindow(14)).toBe(false);
+  });
+});
+
+describe("overview source validation", () => {
+  it("deduplicates connected anonymous sources and rejects unregistered banks", async () => {
+    expect(
+      parseOverviewSourceIds(
+        new URL("https://fxpulse.example/api/overview?sources=hsbc_public,bank_boc,bank_boc"),
+      ),
+    ).toEqual(["hsbc_public", "bank_boc"]);
+
+    const unsupported = parseOverviewSourceIds(
+      new URL("https://fxpulse.example/api/overview?sources=bank_za"),
+    );
+    expect(unsupported).toBeInstanceOf(Response);
+    expect((unsupported as Response).status).toBe(400);
+    expect(await (unsupported as Response).json()).toEqual({ error: "Unsupported overview source" });
+  });
+
+  it("returns the two pinned sources plus only the requested connected extras", async () => {
+    const usdRates = Object.fromEntries(
+      CURRENCY_CODES.map((code, index) => [code, code === "USD" ? 1 : 0.75 + index * 0.21]),
+    );
+    const bankRows = HONG_KONG_BANKS.map(
+      (bank, index) => `<tr>
+        <td><a href="/store/hk/${bank.id}/hkd">${bank.name}</a></td>
+        <td data-selected-rate="${(5 + index * 0.01).toFixed(5)}"></td>
+        <td data-selected-rate="${(5.08 + index * 0.01).toFixed(5)}"></td>
+      </tr>`,
+    ).join("");
+    const requestedUrls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      requestedUrls.push(url.toString());
+      if (url.hostname === "open.er-api.com") {
+        return Response.json({
+          result: "success",
+          base_code: "USD",
+          time_last_update_unix: 1_785_830_000,
+          rates: usdRates,
+        });
+      }
+      if (url.hostname === "wise.com") {
+        const source = url.searchParams.get("source") ?? "";
+        const target = url.searchParams.get("target") ?? "";
+        return Response.json({
+          source,
+          target,
+          value: Number(usdRates[target]) / Number(usdRates[source]),
+          time: 1_785_830_000_000,
+        });
+      }
+      if (url.hostname === "rbwm-api.hsbc.com.hk") {
+        return Response.json({
+          detailRates: CURRENCY_CODES.filter((code) => code !== "HKD").map((code, index) => ({
+            ccy: code,
+            ttBuyRt: String(5 + index * 0.1),
+            ttSelRt: String(5.08 + index * 0.1),
+            lastUpdateDate: "2026-08-05 17:00:00 +0800",
+          })),
+        });
+      }
+      if (url.hostname === "yoyorate.com") {
+        return new Response(`<table>${bankRows}</table>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const stored: Promise<unknown>[] = [];
+    const db = {
+      prepare: () => ({
+        bind: () => ({ first: async () => null }),
+      }),
+      batch: async () => [],
+    } as never;
+    const ctx = {
+      waitUntil: (promise: Promise<unknown>) => stored.push(promise),
+    } as unknown as ExecutionContext;
+
+    try {
+      const response = await handleOverview(
+        new URL(
+          "https://fxpulse.example/api/overview?base=AUD&sources=hsbc_public,bank_boc",
+        ),
+        { DB: db } as never,
+        ctx,
+      );
+      const payload = (await response.json()) as {
+        sources: string[];
+        pairs: Array<{ sources: Array<{ id: string; status: string }> }>;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.sources).toEqual(["market", "wise", "hsbc_public", "bank_boc"]);
+      expect(payload.pairs).toHaveLength(10);
+      expect(payload.pairs.every((pair) =>
+        pair.sources.map((source) => source.id).join(",") ===
+          "market,wise,hsbc_public,bank_boc"
+      )).toBe(true);
+      expect(requestedUrls.filter((url) => url.includes("yoyorate.com/compare"))).toHaveLength(10);
+      await Promise.all(stored);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("layered bar chart dates", () => {
+  it("places different source timestamps from the same Hong Kong day on one bar position", () => {
+    const helperStart = appScript.indexOf("function renderBarSeries");
+    const helperEnd = appScript.indexOf("function downsamplePoints", helperStart);
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helpers = appScript.slice(helperStart, helperEnd);
+    const { normalizeBarSeriesByDay, renderBarSeries } = new Function(
+      "sourceColor",
+      "escapeHtml",
+      "formatRate",
+      "state",
+      `${helpers}; return { normalizeBarSeriesByDay, renderBarSeries };`,
+    )(
+      (id: string) => id === "market" ? "#57efb3" : "#76c8ff",
+      (value: string) => value,
+      (value: number) => String(value),
+      { quote: "USD" },
+    ) as {
+      normalizeBarSeriesByDay: (
+        series: Array<{
+          id: string;
+          points: Array<{ timestamp: number; date: string; rate: number }>;
+        }>,
+        limit: number,
+      ) => Array<{
+        id: string;
+        points: Array<{ timestamp: number; date: string; rate: number }>;
+      }>;
+      renderBarSeries: (
+        series: Array<{
+          id: string;
+          label?: string;
+          points: Array<{ timestamp: number; date: string; rate: number }>;
+        }>,
+        barDays: number[],
+        x: (timestamp: number) => number,
+        y: (rate: number) => number,
+        height: number,
+        padding: { left: number; right: number; bottom: number },
+        width: number,
+      ) => string;
+    };
+
+    const result = normalizeBarSeriesByDay(
+      [
+        {
+          id: "market",
+          points: [
+            { timestamp: Date.parse("2026-08-04T16:30:00Z") / 1000, date: "2026-08-04T16:30:00Z", rate: 0.7037 },
+            { timestamp: Date.parse("2026-08-05T08:00:00Z") / 1000, date: "2026-08-05T08:00:00Z", rate: 0.7041 },
+            { timestamp: Date.parse("2026-08-05T16:15:00Z") / 1000, date: "2026-08-05T16:15:00Z", rate: 0.7043 },
+          ],
+        },
+        {
+          id: "wise",
+          points: [
+            { timestamp: Date.parse("2026-08-05T03:00:00Z") / 1000, date: "2026-08-05T03:00:00Z", rate: 0.7045 },
+            { timestamp: Date.parse("2026-08-05T17:00:00Z") / 1000, date: "2026-08-05T17:00:00Z", rate: 0.7046 },
+          ],
+        },
+      ],
+      100,
+    );
+
+    expect(result[0]?.points).toHaveLength(2);
+    expect(result[1]?.points).toHaveLength(2);
+    expect(result[0]?.points[0]?.timestamp).toBe(result[1]?.points[0]?.timestamp);
+    expect(result[0]?.points[1]?.timestamp).toBe(result[1]?.points[1]?.timestamp);
+    expect(result[0]?.points[0]?.rate).toBe(0.7041);
+    expect(result[0]?.points[0]?.date).toBe("2026-08-05T04:00:00.000Z");
+
+    const barDays = [...new Set(result.flatMap((series) => series.points.map((point) => point.timestamp)))];
+    const svg = renderBarSeries(
+      result.map((series) => ({ ...series, label: series.id })),
+      barDays,
+      () => 100,
+      (rate) => 260 - rate * 100,
+      300,
+      { left: 70, right: 20, bottom: 40 },
+      500,
+    );
+    expect(svg.match(/class="chart-bar-day"/g)).toHaveLength(2);
+    const firstDay = svg.slice(0, svg.indexOf("</g>") + 4);
+    expect(firstDay).toContain('data-source="market"');
+    expect(firstDay).toContain('data-source="wise"');
   });
 });
 
@@ -313,7 +515,7 @@ describe("search surfaces", () => {
     expect(sitemap).not.toContain("/rates/hkd/hkd");
   });
 
-  it("renders the standalone calculator, labelled reversal and three-source overview", () => {
+  it("renders the unified source table and configurable market overview", () => {
     const html = renderPage({
       origin: "https://fxpulse.example",
       base: "AUD",
@@ -336,7 +538,7 @@ describe("search surfaces", () => {
     expect(html).toContain('id="converted-amount"');
     expect(html).toContain('id="calculator-source"');
     expect(html).toContain('<option value="market" selected>公共市场参考价（默认）</option>');
-    expect(html.match(/<option value="bank_[a-z0-9]+">/g)).toHaveLength(18);
+    expect(html.match(/<option value="bank_[a-z0-9]+">/g)).toHaveLength(17);
     expect(html).toContain('id="swap-pair"');
     expect(html).toContain('id="swap-label">AUD / USD');
     expect(html).toContain('id="overview-swap"');
@@ -346,25 +548,36 @@ describe("search surfaces", () => {
       overview.indexOf('data-currency="CAD"'),
     );
     expect(overview).toContain("当前目标 · 1 AUD → USD");
-    expect(html).toContain('id="comparison-grid"');
-    expect(html).toContain('data-source="wise"');
-    expect(html).toContain('data-source="hsbc_public"');
+    expect(html).not.toContain('id="comparison-grid"');
+    expect(html).not.toContain("SAME PAIR · THREE SOURCES");
     expect(html).toContain('id="banks"');
     expect(html).toContain('id="bank-table-body"');
     expect(html).toContain('id="bank-best"');
+    expect(html).toContain("ALL CONNECTED RATE SOURCES");
+    expect(html).toContain("公共市场与 Wise 固定置顶");
     expect(html).toContain("18 家银行牌价");
     expect(html.match(/data-overview-rate="market"/g)).toHaveLength(10);
     expect(html.match(/data-overview-rate="wise"/g)).toHaveLength(10);
-    expect(html.match(/data-overview-rate="hsbc_public"/g)).toHaveLength(10);
-    expect(html).toContain("1 AUD 兑换其他币种 · 三源报价");
+    expect(html.match(/data-overview-rate="hsbc_public"/g)).toBeNull();
+    expect(html).toContain("1 AUD 兑换其他币种 · 可配置多源报价");
+    expect(html).toContain('id="overview-global-config"');
+    expect(html).toContain('id="overview-global-count">0 / 5');
+    expect(html.match(/data-overview-global-source/g)).toHaveLength(18);
+    expect(html.match(/data-card-follow-global/g)).toHaveLength(10);
+    expect(html.match(/data-card-source-config/g)).toHaveLength(10);
+    expect(appScript).toContain("selected.length > 5");
+    expect(appScript).toContain("openCardConfigs");
+    expect(appScript).toContain("fxpulse.overview.global-sources.v1");
+    expect(appScript).toContain("fxpulse.overview.card-sources.v1");
     expect(html).toContain("金额只用于本计算器");
-    expect(html).toContain("汇丰公开牌价（TT）");
+    expect(html).toContain("汇丰公开 TT");
     expect(html).toContain('data-chart-type="line"');
     expect(html).toContain('data-chart-type="bar"');
-    expect(html.match(/data-history-source/g)).toHaveLength(21);
+    expect(html.match(/data-history-source/g)).toHaveLength(20);
     expect(html).toContain("历史数据源（可多选）");
     expect(html).toContain("本站数据须经书面授权方可使用");
     expect(html).toContain("未经授权使用将被视为侵权");
+    expect(html).toContain("仅能登录后查看或没有可靠第三方实时来源的银行不会接入");
     expect(html).toContain("https://github.com/wxywizard/FXPulse");
   });
 });

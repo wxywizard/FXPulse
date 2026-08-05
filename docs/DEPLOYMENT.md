@@ -15,7 +15,7 @@
 | Production branch | `main` |
 | 自定义域名 | `fxpulse.177.best` |
 
-公共市场、Wise 和汇丰公开牌价均通过匿名公开接口获取，生产环境不需要 `WISE_API_TOKEN`、`HSBC_INGEST_TOKEN` 或任何汇丰账号凭据。
+所有已注册来源均通过匿名公开接口或公开聚合页获取，生产环境不需要 `WISE_API_TOKEN`、`HSBC_INGEST_TOKEN`、银行账号、Cookie 或登录会话。需要登录的银行报价不得加入来源配置。
 
 ## 2. 首次部署
 
@@ -98,7 +98,7 @@ hsbc_public
 - 汇丰 `basis` 显示 `BASE TT Buy ÷ QUOTE TT Sell` 或对应 HKD 单边公式；
 - 汇丰正反向不是简单倒数，因为 TT 买卖价差被保留；
 - 每项来源有独立更新时间与状态；
-- 页面反转按钮会同步更新 URL、计算器、三源比较和走势图。
+- 页面反转按钮会同步更新 URL、计算器、统一来源表和走势图。
 
 检查香港银行排行：
 
@@ -109,6 +109,14 @@ curl "https://fxpulse.177.best/api/banks?base=AUD&quote=USD"
 银行排行响应应满足：
 
 - 银行接口固定返回 18 家银行及每行可用状态，汇丰行为官方直连；页面 `#banks` 表格按可得目标币种数量从高到低排序。
+
+检查可配置总览：
+
+```bash
+curl "https://fxpulse.177.best/api/overview?base=AUD&sources=hsbc_public,bank_boc"
+```
+
+响应中的每个币种对都应包含固定的 `market`、`wise`，并在可用时包含请求的额外来源；页面全局和单卡配置都应拒绝选择超过 5 个额外来源。
 
 检查多来源历史：
 
@@ -147,7 +155,7 @@ ORDER BY provider;
 
 | 现象 | 检查 |
 |---|---|
-| 三源全部失败 | 检查 Worker 出站网络、构建版本与 `/api/health` |
+| 核心来源全部失败 | 检查 Worker 出站网络、构建版本与 `/api/health` |
 | Wise 显示归档/暂不可用 | 检查 Worker 日志中的 `Wise public quote unavailable` |
 | 汇丰显示归档/暂不可用 | 检查 Worker 日志中的 `HSBC public quote unavailable` |
 | 汇丰牌价方向不符 | 确认页面含义是“卖出 BASE、买入 QUOTE”，并核对 `basis` |

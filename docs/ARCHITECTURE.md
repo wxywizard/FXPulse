@@ -2,7 +2,7 @@
 
 ## 方案结论
 
-FXPulse 使用 Cloudflare Workers 全栈方案：同一个 Worker 返回服务端 HTML、API 和静态资源，Cron Trigger 定时采集，D1 保存历史快照。页面访问时读取公共市场、Wise、汇丰香港官方 TT，以及 18 家香港零售银行公开 TT 牌价。
+FXPulse 使用 Cloudflare Workers 全栈方案：同一个 Worker 返回服务端 HTML、API 和静态资源，Cron Trigger 定时采集，D1 保存历史快照。页面访问时读取公共市场、Wise 与当前已接入 18 家香港零售银行公开 TT 牌价；其中汇丰行由官网匿名接口校准。
 
 ```mermaid
 flowchart TD
@@ -18,6 +18,8 @@ flowchart TD
 
 所有当前价都通过公开匿名接口或公开牌价页获取，不需要 Wise Token、银行账号、Cookie 或登录会话。汇丰行由官网匿名接口校准，其余银行明确标记为公开聚合数据。
 
+浏览器用 `localStorage` 保存 `MARKET OVERVIEW` 全局额外来源及每个币种对的单卡覆盖。两级配置都最多 5 个额外来源；公共市场和 Wise 固定展示。Worker 只为本次请求的来源取数，避免未选银行增加页面请求负载。
+
 ## 请求路径
 
 | 路径 | 处理方式 | 缓存 |
@@ -25,7 +27,7 @@ flowchart TD
 | `/`、`/rates/*` | Worker 服务端生成语义化 HTML | HTML 5 分钟 |
 | `/api/rates` | 返回 11 币种公共市场参考价 | 边缘 5 分钟 |
 | `/api/compare` | 公共市场、Wise、汇丰同方向比较 | 边缘 1 分钟 |
-| `/api/overview` | 一个基准币种对应 10 个目标币种的三源批量报价 | 边缘 1 分钟 |
+| `/api/overview` | 一个基准币种对应 10 个目标币种的可配置批量报价；市场与 Wise 固定，`sources` 指定额外来源 | 边缘 1 分钟 |
 | `/api/banks` | 当前币种对的 18 家香港银行 TT 排行与缺失状态 | 边缘 5 分钟 |
 | `/api/history` | 多来源 D1 历史；公共市场不足时回退 Frankfurter | 边缘 5 分钟 |
 | `/sitemap.xml` | 动态生成全部 110 个有向币种对 | 24 小时 |
@@ -102,6 +104,7 @@ Wise 归档允许在缺少同方向数据时取倒数；汇丰和其他银行归
 - 上游地址写死在 Worker，不提供任意 URL 代理能力。
 - 不接收汇丰登录 Token、Cookie、账户号或个人资料。
 - 不需要第三方 API Secret；D1 ID 是资源标识符，不是访问凭据。
+- 不注册需要登录 App/网银的来源；只有无需登录且口径可靠的第三方实时数据源通过验证后才能加入来源目录。
 - 页面设置 CSP、`X-Content-Type-Options`、`Referrer-Policy` 与 `Permissions-Policy`。
 
 ## 部署

@@ -14,6 +14,9 @@ const CURRENCIES = {
 
 const CODES = Object.keys(CURRENCIES);
 const initial = JSON.parse(document.querySelector("#fxpulse-data").textContent);
+const OVERVIEW_GLOBAL_STORAGE_KEY = "fxpulse.overview.global-sources.v1";
+const OVERVIEW_CARD_STORAGE_KEY = "fxpulse.overview.card-sources.v1";
+const SOURCE_CATALOG = Array.isArray(initial.sourceCatalog) ? initial.sourceCatalog : [];
 const state = {
   base: initial.base,
   quote: initial.quote,
@@ -23,6 +26,8 @@ const state = {
   bankComparison: null,
   overview: null,
   overviewError: null,
+  overviewGlobalSources: readGlobalOverviewSources(),
+  overviewCardSources: readCardOverviewSources(),
   calculatorSource: "market",
   chartType: "line",
   chartSources: new Set(["market"]),
@@ -47,8 +52,11 @@ const elements = {
   grid: document.querySelector("#rate-grid"),
   rateError: document.querySelector("#rate-error"),
   overviewError: document.querySelector("#overview-error"),
-  comparisonGrid: document.querySelector("#comparison-grid"),
-  comparisonNote: document.querySelector("#comparison-note"),
+  overviewLegend: document.querySelector("#overview-legend"),
+  overviewGlobalConfig: document.querySelector("#overview-global-config"),
+  overviewGlobalOptions: document.querySelector("#overview-global-options"),
+  overviewGlobalCount: document.querySelector("#overview-global-count"),
+  overviewGlobalNote: document.querySelector("#overview-global-note"),
   bankTableBody: document.querySelector("#bank-table-body"),
   bankTableWrap: document.querySelector(".bank-table-wrap"),
   bankError: document.querySelector("#bank-error"),
@@ -65,6 +73,7 @@ const elements = {
 
 function init() {
   bindEvents();
+  syncOverviewGlobalConfig();
   updateChartSelectionNote();
   refreshCalculatorSources();
   updateBaseChrome();
@@ -119,7 +128,19 @@ function bindEvents() {
   elements.overviewSwap.addEventListener("click", swapPair);
 
   elements.grid.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-currency]");
+    const reset = event.target.closest("[data-card-config-reset]");
+    if (reset) {
+      const card = reset.closest("[data-currency]");
+      if (!card) return;
+      delete state.overviewCardSources[cardConfigKey(card.dataset.currency)];
+      persistCardOverviewSources();
+      renderRates();
+      loadOverview();
+      return;
+    }
+    const select = event.target.closest("[data-select-currency]");
+    if (!select) return;
+    const card = select.closest("[data-currency]");
     if (!card) return;
     state.quote = card.dataset.currency;
     resetPairData();
@@ -128,6 +149,47 @@ function bindEvents() {
     updateUrl();
     Promise.all([loadHistory(), loadComparison(), loadBanks()]);
     document.querySelector("#trend").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  elements.overviewGlobalConfig.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-overview-global-source]");
+    if (!input) return;
+    const selected = selectedCheckboxValues(elements.overviewGlobalOptions, "[data-overview-global-source]");
+    if (selected.length > 5) {
+      input.checked = false;
+      elements.overviewGlobalNote.textContent = "最多只能增加 5 个全局数据源。";
+      return;
+    }
+    state.overviewGlobalSources = normalizeOverviewSourceIds(selected);
+    persistGlobalOverviewSources();
+    syncOverviewGlobalConfig();
+    renderRates();
+    loadOverview();
+  });
+
+  elements.grid.addEventListener("change", (event) => {
+    const card = event.target.closest("[data-currency]");
+    if (!card) return;
+    const quote = card.dataset.currency;
+    const key = cardConfigKey(quote);
+    const follow = event.target.closest("[data-card-follow-global]");
+    if (follow) {
+      if (follow.checked) delete state.overviewCardSources[key];
+      else state.overviewCardSources[key] = [...state.overviewGlobalSources];
+    } else {
+      const sourceInput = event.target.closest("[data-overview-card-source]");
+      if (!sourceInput) return;
+      const selected = selectedCheckboxValues(card, "[data-overview-card-source]");
+      if (selected.length > 5) {
+        sourceInput.checked = false;
+        card.querySelector("[data-card-config-note]").textContent = "每张卡最多增加 5 个数据源。";
+        return;
+      }
+      state.overviewCardSources[key] = normalizeOverviewSourceIds(selected);
+    }
+    persistCardOverviewSources();
+    renderRates();
+    loadOverview();
   });
 
   document.querySelector(".range-switcher").addEventListener("click", (event) => {
@@ -241,8 +303,6 @@ async function loadCurrentRates() {
 async function loadComparison() {
   if (state.comparisonController) state.comparisonController.abort();
   state.comparisonController = new AbortController();
-  elements.comparisonGrid.classList.add("loading");
-  elements.comparisonNote.textContent = "正在加载各来源的可用报价与更新时间。";
 
   try {
     const query = new URLSearchParams({ base: state.base, quote: state.quote });
@@ -251,16 +311,13 @@ async function loadComparison() {
       signal: state.comparisonController.signal,
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "三源报价暂时不可用");
+    if (!response.ok) throw new Error(payload.error || "核心汇率暂时不可用");
     state.comparison = payload;
     renderComparison(payload);
   } catch (error) {
     if (error.name === "AbortError") return;
-    elements.comparisonGrid.innerHTML = `<div class="comparison-error"><strong>暂时无法加载三源对比</strong><span>${escapeHtml(error.message)}</span><button type="button" id="retry-comparison">重试</button></div>`;
-    elements.comparisonNote.textContent = "没有使用其他来源补造 Wise 或汇丰报价。";
-    document.querySelector("#retry-comparison")?.addEventListener("click", loadComparison);
-  } finally {
-    elements.comparisonGrid.classList.remove("loading");
+    state.comparison = null;
+    renderUnifiedSources();
   }
 }
 
@@ -284,10 +341,11 @@ async function loadBanks() {
     renderBanks(payload);
   } catch (error) {
     if (error.name === "AbortError") return;
-    elements.bankError.textContent = `${error.message}。公共市场、Wise 与汇丰官方三源仍可正常使用。`;
+    elements.bankError.textContent = `${error.message}。公共市场与 Wise 仍会保留在统一来源表中。`;
     elements.bankError.hidden = false;
     elements.bankBest.textContent = "暂不可用";
-    elements.bankTableBody.innerHTML = `<tr class="bank-row bank-row-error"><td colspan="6"><strong>银行牌价加载失败</strong><button type="button" id="retry-banks">重试</button></td></tr>`;
+    renderUnifiedSources();
+    elements.bankTableBody.insertAdjacentHTML("beforeend", `<tr class="bank-row bank-row-error"><td colspan="7"><strong>银行牌价加载失败</strong><button type="button" id="retry-banks">重试</button></td></tr>`);
     document.querySelector("#retry-banks")?.addEventListener("click", loadBanks);
   } finally {
     elements.bankTableWrap.classList.remove("loading");
@@ -302,20 +360,23 @@ async function loadOverview() {
   elements.grid.classList.add("provider-loading");
 
   try {
-    const query = new URLSearchParams({ base: state.base });
+    const query = new URLSearchParams({
+      base: state.base,
+      sources: requestedOverviewSources().join(","),
+    });
     const response = await fetch(`/api/overview?${query}`, {
       headers: { accept: "application/json" },
       signal: state.overviewController.signal,
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "三源总览暂时不可用");
+    if (!response.ok) throw new Error(payload.error || "多来源总览暂时不可用");
     state.overview = payload;
     renderRates();
   } catch (error) {
     if (error.name === "AbortError") return;
     state.overviewError = error.message;
     renderRates();
-    elements.overviewError.textContent = `Wise 与汇丰总览暂时无法加载：${error.message}。公共市场参考价仍可使用。`;
+    elements.overviewError.textContent = `附加来源总览暂时无法加载：${error.message}。公共市场参考价仍可使用。`;
     elements.overviewError.hidden = false;
   } finally {
     elements.grid.classList.remove("provider-loading");
@@ -376,6 +437,11 @@ function renderHistory(payload) {
 }
 
 function renderRates() {
+  const openCardConfigs = new Set(
+    [...elements.grid.querySelectorAll("[data-card-source-config][open]")]
+      .map((details) => details.closest("[data-currency]")?.dataset.currency)
+      .filter(Boolean),
+  );
   elements.grid.innerHTML = orderedQuoteCodes()
     .map((code) => {
       const meta = CURRENCIES[code];
@@ -389,7 +455,9 @@ function renderRates() {
             differenceFromMarketPct: 0,
           }
         : null;
-      return `<button type="button" class="rate-card ${code === state.quote ? "active" : ""}" data-currency="${code}" aria-label="比较 ${state.base} 兑 ${code} 三种来源汇率并查看走势">
+      const configuredSources = ["market", "wise", ...configuredOverviewExtras(code)];
+      return `<article class="rate-card ${code === state.quote ? "active" : ""}" data-currency="${code}">
+        <button type="button" class="rate-card-select" data-select-currency aria-label="比较 ${state.base} 兑 ${code} 多来源汇率并查看走势">
         <span class="rate-card-header">
           <span class="flag" aria-hidden="true">${meta.flag}</span>
           <span class="currency-id"><strong>${code}</strong><small>${meta.name}</small></span>
@@ -397,21 +465,143 @@ function renderRates() {
           <span class="card-arrow" aria-hidden="true">↗</span>
         </span>
         <span class="provider-rate-list">
-          ${renderOverviewSource("market", "公共市场", sources.get("market") ?? marketFallback, code)}
-          ${renderOverviewSource("wise", "Wise", sources.get("wise") ?? null, code)}
-          ${renderOverviewSource("hsbc_public", "汇丰 TT", sources.get("hsbc_public") ?? null, code)}
+          ${configuredSources.map((id) => {
+            const label = overviewSourceLabel(id);
+            const source = id === "market"
+              ? sources.get(id) ?? marketFallback
+              : sources.get(id) ?? null;
+            return renderOverviewSource(id, label, source, code);
+          }).join("")}
         </span>
         <span class="card-footer">选择 ${code} 查看详细对比与走势 <b>查看</b></span>
-      </button>`;
+        </button>
+        ${renderCardSourceConfig(code)}
+      </article>`;
     })
     .join("");
-  document.querySelector("#rates-title").textContent = `1 ${state.base} 兑换其他币种 · 三源报价`;
+  elements.grid.querySelectorAll("[data-currency]").forEach((card) => {
+    if (openCardConfigs.has(card.dataset.currency)) {
+      card.querySelector("[data-card-source-config]").open = true;
+    }
+  });
+  document.querySelector("#rates-title").textContent = `1 ${state.base} 兑换其他币种 · 可配置多源报价`;
+  renderOverviewLegend();
   refreshCalculatorSources();
   updateConversion();
 }
 
 function orderedQuoteCodes() {
   return [state.quote, ...CODES.filter((code) => code !== state.base && code !== state.quote)];
+}
+
+function overviewSourceLabel(id) {
+  if (id === "market") return "公共市场";
+  if (id === "wise") return "Wise";
+  return SOURCE_CATALOG.find((source) => source.id === id)?.label ?? id;
+}
+
+function normalizeOverviewSourceIds(values) {
+  const supported = new Set(SOURCE_CATALOG.map((source) => source.id));
+  return [...new Set(Array.isArray(values) ? values : [])]
+    .filter((id) => supported.has(id))
+    .slice(0, 5);
+}
+
+function readGlobalOverviewSources() {
+  try {
+    return normalizeOverviewSourceIds(JSON.parse(localStorage.getItem(OVERVIEW_GLOBAL_STORAGE_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function readCardOverviewSources() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(OVERVIEW_CARD_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => Array.isArray(value))
+        .map(([key, value]) => [key, normalizeOverviewSourceIds(value)]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistGlobalOverviewSources() {
+  try {
+    localStorage.setItem(OVERVIEW_GLOBAL_STORAGE_KEY, JSON.stringify(state.overviewGlobalSources));
+  } catch {
+    // Private browsing or a restrictive storage policy should not block rate viewing.
+  }
+}
+
+function persistCardOverviewSources() {
+  try {
+    localStorage.setItem(OVERVIEW_CARD_STORAGE_KEY, JSON.stringify(state.overviewCardSources));
+  } catch {
+    // Keep the current in-memory configuration when storage is unavailable.
+  }
+}
+
+function cardConfigKey(quote) {
+  return `${state.base}/${quote}`;
+}
+
+function configuredOverviewExtras(quote) {
+  const key = cardConfigKey(quote);
+  return Object.prototype.hasOwnProperty.call(state.overviewCardSources, key)
+    ? state.overviewCardSources[key]
+    : state.overviewGlobalSources;
+}
+
+function requestedOverviewSources() {
+  return [...new Set(orderedQuoteCodes().flatMap((quote) => configuredOverviewExtras(quote)))];
+}
+
+function selectedCheckboxValues(container, selector) {
+  return [...container.querySelectorAll(`${selector}:checked`)].map((input) => input.value);
+}
+
+function syncOverviewGlobalConfig() {
+  const selected = new Set(state.overviewGlobalSources);
+  elements.overviewGlobalOptions.querySelectorAll("[data-overview-global-source]").forEach((input) => {
+    input.checked = selected.has(input.value);
+    const colorDot = input.nextElementSibling?.querySelector("i");
+    if (colorDot) colorDot.style.background = sourceColor(input.value);
+  });
+  elements.overviewGlobalCount.textContent = `${selected.size} / 5`;
+  elements.overviewGlobalNote.textContent = selected.size
+    ? `当前附加：${state.overviewGlobalSources.map(overviewSourceLabel).join("、")}`
+    : "当前使用默认配置：公共市场 + Wise。";
+  renderOverviewLegend();
+}
+
+function renderOverviewLegend() {
+  const sources = ["market", "wise", ...state.overviewGlobalSources];
+  elements.overviewLegend.innerHTML = sources
+    .map((id) => `<span><i style="background:${sourceColor(id)}"></i>${escapeHtml(overviewSourceLabel(id))}</span>`)
+    .join("");
+}
+
+function renderCardSourceConfig(quote) {
+  const key = cardConfigKey(quote);
+  const custom = Object.prototype.hasOwnProperty.call(state.overviewCardSources, key);
+  const selected = new Set(custom ? state.overviewCardSources[key] : state.overviewGlobalSources);
+  const options = SOURCE_CATALOG.map((source) => `<label class="overview-source-option">
+    <input type="checkbox" value="${escapeHtml(source.id)}" data-overview-card-source ${selected.has(source.id) ? "checked" : ""} ${custom ? "" : "disabled"}>
+    <span><i style="background:${sourceColor(source.id)}"></i>${escapeHtml(source.label)}</span>
+  </label>`).join("");
+  return `<details class="card-source-config" data-card-source-config>
+    <summary>卡片数据源 <b data-card-source-mode>${custom ? `自定义 ${selected.size} / 5` : "跟随全局"}</b></summary>
+    <div class="card-config-panel">
+      <label class="card-follow-option"><input type="checkbox" data-card-follow-global ${custom ? "" : "checked"}><span>跟随全局配置</span></label>
+      <p>取消跟随后，可为 ${quote} 单独选择最多 5 个附加来源。</p>
+      <div class="overview-config-options card-config-options">${options}</div>
+      <div class="card-config-footer"><small data-card-config-note>${custom ? "该卡片使用独立配置。" : "当前跟随全局配置。"}</small><button type="button" data-card-config-reset>恢复全局</button></div>
+    </div>
+  </details>`;
 }
 
 function renderOverviewSource(id, label, source, quote) {
@@ -425,7 +615,7 @@ function renderOverviewSource(id, label, source, quote) {
     detail = `${difference >= 0 ? "+" : ""}${difference.toFixed(3)}%`;
   } else if (status === "stale") detail = "最近归档";
 
-  return `<span class="provider-rate provider-${escapeHtml(id)} ${escapeHtml(status)}">
+  return `<span class="provider-rate provider-${escapeHtml(id)} ${escapeHtml(status)}" style="--source-color:${sourceColor(id)}">
     <span class="provider-label"><i></i>${escapeHtml(label)}</span>
     <strong data-overview-rate="${escapeHtml(id)}">${available ? formatRate(source.rate, quote) : "—"}<em>${quote}</em></strong>
     <small data-overview-diff="${escapeHtml(id)}">${escapeHtml(detail)}</small>
@@ -433,64 +623,14 @@ function renderOverviewSource(id, label, source, quote) {
 }
 
 function renderComparison(payload) {
-  elements.comparisonGrid.innerHTML = payload.sources
-    .map((source) => {
-      const available = typeof source.rate === "number" && Number.isFinite(source.rate);
-      const statusLabel = source.status === "available" ? "实时" : source.status === "stale" ? "归档" : "暂不可用";
-      const difference = typeof source.differenceFromMarketPct === "number"
-        ? source.id === "market"
-          ? "比较基准"
-          : `较公共市场价 ${source.differenceFromMarketPct >= 0 ? "+" : ""}${source.differenceFromMarketPct.toFixed(3)}%`
-        : source.reason || "当前没有可验证报价";
-      const rateText = available
-        ? `1 ${state.base} = ${formatRate(source.rate, state.quote)} ${state.quote}`
-        : "暂无报价";
-      const updated = source.sourceUpdatedAt ? formatSourceTime(source.sourceUpdatedAt) : "—";
-      const basis = source.basis
-        ? `<small class="source-basis">口径：${escapeHtml(source.basis)}</small>`
-        : "";
-      const fallback = available && source.reason
-        ? `<small class="source-warning">${escapeHtml(source.reason)}</small>`
-        : "";
-      return `<article class="source-card source-${escapeHtml(source.id)} ${escapeHtml(source.status)}">
-        <div class="source-card-head"><span>${escapeHtml(source.label)}</span><b>${statusLabel}</b></div>
-        <strong>${rateText}</strong>
-        <p>${escapeHtml(difference)}</p>
-        ${basis}${fallback}
-        <small>更新时间：${escapeHtml(updated)}</small>
-        <a href="${escapeHtml(source.providerUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.provider)} <span aria-hidden="true">↗</span></a>
-      </article>`;
-    })
-    .join("");
-  elements.comparisonNote.textContent = payload.interpretation;
+  renderUnifiedSources();
   refreshCalculatorSources();
   updateConversion();
 }
 
 function renderBanks(payload) {
-  elements.bankTableBody.innerHTML = payload.banks
-    .map((bank) => {
-      const available = typeof bank.rate === "number" && Number.isFinite(bank.rate);
-      const difference = typeof bank.differenceFromMarketPct === "number"
-        ? `${bank.differenceFromMarketPct >= 0 ? "+" : ""}${bank.differenceFromMarketPct.toFixed(3)}%`
-        : bank.reason || "暂不可用";
-      const observed = bank.observedAt ? formatSourceTime(bank.observedAt) : "—";
-      const sourceLabel = bank.source === "HSBC Hong Kong" ? "官方直连" : "公开聚合";
-      return `<tr class="bank-row ${available ? "available" : "unavailable"} ${bank.rank === 1 ? "best" : ""}">
-        <td class="bank-rank">${available ? `#${bank.rank}` : "—"}</td>
-        <td class="bank-name">
-          <a href="${escapeHtml(bank.sourceUrl)}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(bank.name)}</strong><small>${escapeHtml(bank.englishName)}</small></a>
-          <em>${escapeHtml(sourceLabel)}</em>
-        </td>
-        <td class="bank-rate">${available ? `<strong>${formatRate(bank.rate, state.quote)}</strong><small>${state.quote}</small>` : "—"}</td>
-        <td class="bank-diff ${available && bank.differenceFromMarketPct >= 0 ? "positive" : "negative"}">${escapeHtml(difference)}</td>
-        <td class="bank-basis">${escapeHtml(bank.basis || bank.reason || "该币种暂未公布")}</td>
-        <td class="bank-updated">${escapeHtml(observed)}</td>
-      </tr>`;
-    })
-    .join("");
-
-  const best = payload.bestBank;
+  renderUnifiedSources();
+  const best = payload?.bestBank;
   elements.bankBest.textContent = best
     ? `${best.name} · ${formatRate(best.rate, state.quote)} ${state.quote}`
     : "暂无可用报价";
@@ -501,11 +641,96 @@ function renderBanks(payload) {
   updateConversion();
 }
 
+function renderUnifiedSources() {
+  const comparisonSources = new Map(
+    (state.comparison?.sources ?? []).map((source) => [source.id, source]),
+  );
+  const marketRate = state.snapshot?.rates?.[state.quote];
+  const coreSources = [
+    comparisonSources.get("market") ?? {
+      id: "market",
+      label: "公共市场参考价",
+      rate: Number.isFinite(marketRate) ? marketRate : null,
+      differenceFromMarketPct: 0,
+      sourceUpdatedAt: state.snapshot?.sourceUpdatedAt
+        ? new Date(state.snapshot.sourceUpdatedAt * 1000).toISOString()
+        : null,
+      provider: state.snapshot?.provider ?? "ExchangeRate-API",
+      providerUrl: state.snapshot?.providerUrl ?? "https://www.exchangerate-api.com/",
+    },
+    comparisonSources.get("wise") ?? {
+      id: "wise",
+      label: "Wise 公开中间价",
+      rate: null,
+      differenceFromMarketPct: null,
+      sourceUpdatedAt: null,
+      provider: "Wise",
+      providerUrl: "https://wise.com/gb/currency-converter/",
+    },
+  ];
+  const banks = state.bankComparison?.banks ?? [];
+  const hsbcFallback = banks.length === 0
+    ? [...comparisonSources.values()].filter((source) => source.id === "hsbc_public")
+    : [];
+  const rows = [
+    ...coreSources.map(renderReferenceSourceRow),
+    ...hsbcFallback.map(renderReferenceSourceRow),
+    ...banks.map(renderBankSourceRow),
+  ].join("");
+  elements.bankTableBody.innerHTML = rows || `<tr class="bank-row bank-row-loading"><td colspan="7">正在加载公共市场、Wise 与香港银行公开牌价</td></tr>`;
+}
+
+function renderReferenceSourceRow(source) {
+  const available = Number.isFinite(source?.rate);
+  const difference = source.id === "market"
+    ? "基准"
+    : Number.isFinite(source.differenceFromMarketPct)
+      ? `${source.differenceFromMarketPct >= 0 ? "+" : ""}${source.differenceFromMarketPct.toFixed(3)}%`
+      : "暂不可用";
+  const type = source.id === "market" ? "市场参考" : source.id === "wise" ? "公开中间价" : "银行 TT";
+  const badge = source.id === "market" ? "公开市场" : source.id === "wise" ? "公开直连" : "官方直连";
+  const basis = source.basis || (source.id === "market"
+    ? "统一比较基准，不代表客户成交价"
+    : source.id === "wise"
+      ? "Wise 中间价，未扣转换费用"
+      : "汇丰官方 TT 买卖牌价");
+  const observed = source.sourceUpdatedAt ? formatSourceTime(source.sourceUpdatedAt) : "—";
+  return `<tr class="bank-row reference-row ${available ? "available" : "unavailable"}">
+    <td class="bank-rank">${source.id === "market" ? "基准" : "—"}</td>
+    <td class="bank-name"><a href="${escapeHtml(source.providerUrl)}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(source.label)}</strong><small>${escapeHtml(source.provider)}</small></a><em>${badge}</em></td>
+    <td class="bank-type">${type}</td>
+    <td class="bank-rate">${available ? `<strong>${formatRate(source.rate, state.quote)}</strong><small>${state.quote}</small>` : "—"}</td>
+    <td class="bank-diff ${available && source.differenceFromMarketPct >= 0 ? "positive" : "negative"}">${escapeHtml(difference)}</td>
+    <td class="bank-basis">${escapeHtml(basis)}</td>
+    <td class="bank-updated">${escapeHtml(observed)}</td>
+  </tr>`;
+}
+
+function renderBankSourceRow(bank) {
+  const available = Number.isFinite(bank.rate);
+  const difference = Number.isFinite(bank.differenceFromMarketPct)
+    ? `${bank.differenceFromMarketPct >= 0 ? "+" : ""}${bank.differenceFromMarketPct.toFixed(3)}%`
+    : "暂不可用";
+  const observed = bank.observedAt ? formatSourceTime(bank.observedAt) : "—";
+  const sourceLabel = bank.source === "HSBC Hong Kong" ? "官方直连" : "公开聚合";
+  return `<tr class="bank-row ${available ? "available" : "unavailable"} ${bank.rank === 1 ? "best" : ""}">
+    <td class="bank-rank">${available ? `#${bank.rank}` : "—"}</td>
+    <td class="bank-name"><a href="${escapeHtml(bank.sourceUrl)}" target="_blank" rel="noopener noreferrer"><strong>${escapeHtml(bank.name)}</strong><small>${escapeHtml(bank.englishName)}</small></a><em>${escapeHtml(sourceLabel)}</em></td>
+    <td class="bank-type">银行 TT</td>
+    <td class="bank-rate">${available ? `<strong>${formatRate(bank.rate, state.quote)}</strong><small>${state.quote}</small>` : "—"}</td>
+    <td class="bank-diff ${available && bank.differenceFromMarketPct >= 0 ? "positive" : "negative"}">${escapeHtml(difference)}</td>
+    <td class="bank-basis">${escapeHtml(bank.basis || bank.reason || "该币种暂未公布")}</td>
+    <td class="bank-updated">${escapeHtml(observed)}</td>
+  </tr>`;
+}
+
 function renderChart(seriesList, chartType) {
-  const plottedSeries = seriesList.map((series) => ({
-    ...series,
-    points: downsamplePoints(series.points, chartType === "bar" ? 100 : 260),
-  }));
+  const plottedSeries = chartType === "bar"
+    ? normalizeBarSeriesByDay(seriesList, 100)
+    : seriesList.map((series) => ({
+        ...series,
+        points: downsamplePoints(series.points, 260),
+      }));
   const allPoints = plottedSeries.flatMap((series) => series.points);
   if (allPoints.length < 2) throw new Error("历史数据点不足");
   const width = Math.max(360, Math.round(elements.chart.clientWidth || 960));
@@ -520,7 +745,14 @@ function renderChart(seriesList, chartType) {
   const minTimestamp = Math.min(...allPoints.map((point) => Number(point.timestamp)));
   const maxTimestamp = Math.max(...allPoints.map((point) => Number(point.timestamp)));
   const timeSpread = maxTimestamp - minTimestamp || 1;
-  const x = (timestamp) => padding.left + ((timestamp - minTimestamp) / timeSpread) * (width - padding.left - padding.right);
+  const barDays = chartType === "bar"
+    ? [...new Set(allPoints.map((point) => Number(point.timestamp)))].sort((a, b) => a - b)
+    : [];
+  const barDayIndexes = new Map(barDays.map((timestamp, index) => [timestamp, index]));
+  const plotWidth = width - padding.left - padding.right;
+  const x = chartType === "bar"
+    ? (timestamp) => padding.left + ((barDayIndexes.get(timestamp) ?? 0) + 0.5) / Math.max(1, barDays.length) * plotWidth
+    : (timestamp) => padding.left + ((timestamp - minTimestamp) / timeSpread) * plotWidth;
   const y = (value) => padding.top + ((max - value) / (max - min)) * (height - padding.top - padding.bottom);
 
   const gridLines = Array.from({ length: 5 }, (_, index) => {
@@ -528,19 +760,21 @@ function renderChart(seriesList, chartType) {
     const posY = y(value);
     return `<g><line x1="${padding.left}" x2="${width - padding.right}" y1="${posY}" y2="${posY}"/><text x="${padding.left - 14}" y="${posY + 4}">${formatRate(value, state.quote)}</text></g>`;
   }).join("");
-  const labels = [0, 1, 2, 3]
-    .map((index) => minTimestamp + (timeSpread * index) / 3)
+  const labelTimestamps = chartType === "bar"
+    ? sampleEvenly(barDays, Math.min(4, barDays.length))
+    : [0, 1, 2, 3].map((index) => minTimestamp + (timeSpread * index) / 3);
+  const labels = labelTimestamps
     .map((timestamp) => `<text x="${x(timestamp)}" y="${height - 12}" text-anchor="middle">${formatDate(new Date(timestamp * 1000).toISOString())}</text>`)
     .join("");
   const plot = chartType === "bar"
-    ? renderBarSeries(plottedSeries, x, y, height, padding, width)
+    ? renderBarSeries(plottedSeries, barDays, x, y, height, padding, width)
     : renderLineSeries(plottedSeries, x, y);
   const titleSources = plottedSeries.map((series) => series.label).join("、");
 
   elements.chart.innerHTML = `<figure class="rate-chart chart-${chartType}">
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chart-title chart-desc" preserveAspectRatio="none">
       <title id="chart-title">${state.base} 兑 ${state.quote} 过去 ${state.days} 天${chartType === "bar" ? "柱状" : "折线"}走势：${escapeHtml(titleSources)}</title>
-      <desc id="chart-desc">多来源区间最低 ${formatRate(rawMin, state.quote)}，最高 ${formatRate(rawMax, state.quote)}。柱状图使用颜色叠层区分来源，数值不相加。</desc>
+      <desc id="chart-desc">多来源区间最低 ${formatRate(rawMin, state.quote)}，最高 ${formatRate(rawMax, state.quote)}。柱状图按香港日期对齐，每天仅使用一个柱位，以颜色叠层区分来源，数值不相加。</desc>
       <g class="chart-grid">${gridLines}${labels}</g>
       <g class="chart-series">${plot}</g>
       <line class="chart-cursor" x1="0" x2="0" y1="${padding.top}" y2="${height - padding.bottom}" hidden/>
@@ -558,20 +792,27 @@ function renderChart(seriesList, chartType) {
   hit.addEventListener("pointermove", (event) => {
     const rect = svg.getBoundingClientRect();
     const relative = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const targetTimestamp = minTimestamp + relative * timeSpread;
-    const nearest = plottedSeries.map((series, index) => ({
-      series,
-      item: nearestPoint(series.points, targetTimestamp),
-      color: sourceColor(series.id, index),
-    }));
+    const pointerX = relative * width;
+    const targetTimestamp = chartType === "bar"
+      ? nearestValue(barDays, pointerX, x)
+      : minTimestamp + relative * timeSpread;
+    const nearest = plottedSeries
+      .map((series, index) => ({
+        series,
+        item: chartType === "bar"
+          ? series.points.find((point) => point.timestamp === targetTimestamp)
+          : nearestPoint(series.points, targetTimestamp),
+        color: sourceColor(series.id, index),
+      }))
+      .filter(({ item }) => item);
     const anchor = nearest[0]?.item;
     if (!anchor) return;
-    const itemX = x(anchor.timestamp);
+    const itemX = x(chartType === "bar" ? targetTimestamp : anchor.timestamp);
     cursor.hidden = false;
     cursor.setAttribute("x1", itemX);
     cursor.setAttribute("x2", itemX);
     tooltip.hidden = false;
-    tooltip.innerHTML = `<span>${escapeHtml(formatDateTime(anchor.date))}</span>${nearest
+    tooltip.innerHTML = `<span>${escapeHtml(chartType === "bar" ? formatDate(anchor.date) : formatDateTime(anchor.date))}</span>${nearest
       .map(({ series, item, color }) => `<strong><i style="background:${color}"></i><b>${escapeHtml(series.label)}</b><em>${formatRate(item.rate, state.quote)} ${state.quote}</em></strong>`)
       .join("")}<small>1 ${state.base} 可兑换的 ${state.quote}</small>`;
     tooltip.style.left = `${Math.max(105, Math.min(rect.width - 105, (itemX / width) * rect.width))}px`;
@@ -595,18 +836,76 @@ function renderLineSeries(seriesList, x, y) {
   }).join("");
 }
 
-function renderBarSeries(seriesList, x, y, height, padding, width) {
-  const maxPoints = Math.max(...seriesList.map((series) => series.points.length));
-  const baseWidth = Math.max(1.5, Math.min(18, ((width - padding.left - padding.right) / Math.max(2, maxPoints)) * 0.72));
+function renderBarSeries(seriesList, barDays, x, y, height, padding, width) {
+  const baseWidth = Math.max(1.5, Math.min(22, ((width - padding.left - padding.right) / Math.max(1, barDays.length)) * 0.68));
   const bottom = height - padding.bottom;
-  return seriesList.map((series, index) => {
-    const color = sourceColor(series.id, index);
-    const barWidth = Math.max(1.2, baseWidth * (1 - (index / Math.max(6, seriesList.length)) * 0.35));
-    return series.points.map((point) => {
+  const pointsBySourceAndDay = seriesList.map((series) => new Map(
+    series.points.map((point) => [point.timestamp, point]),
+  ));
+  return barDays.map((timestamp) => {
+    const layers = seriesList.map((series, index) => {
+      const point = pointsBySourceAndDay[index].get(timestamp);
+      if (!point) return "";
+      const color = sourceColor(series.id, index);
+      const barWidth = Math.max(1.2, baseWidth * (1 - (index / Math.max(6, seriesList.length)) * 0.35));
       const top = y(point.rate);
-      return `<rect class="chart-bar" x="${(x(point.timestamp) - barWidth / 2).toFixed(2)}" y="${top.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(1, bottom - top).toFixed(2)}" rx="${Math.min(2, barWidth / 3).toFixed(2)}" style="fill:${color}"/>`;
+      return `<rect class="chart-bar" data-source="${escapeHtml(series.id)}" x="${(x(timestamp) - barWidth / 2).toFixed(2)}" y="${top.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(1, bottom - top).toFixed(2)}" rx="${Math.min(2, barWidth / 3).toFixed(2)}" style="fill:${color}"><title>${escapeHtml(series.label)} · ${formatRate(point.rate, state.quote)} ${state.quote}</title></rect>`;
     }).join("");
+    return `<g class="chart-bar-day" data-day="${timestamp}">${layers}</g>`;
   }).join("");
+}
+
+function normalizeBarSeriesByDay(seriesList, limit) {
+  const daySeconds = 86_400;
+  const hongKongOffsetSeconds = 8 * 3_600;
+  const normalized = seriesList.map((series) => {
+    const latestByDay = new Map();
+    for (const point of series.points) {
+      const observedTimestamp = Number(point.timestamp);
+      if (!Number.isFinite(observedTimestamp)) continue;
+      const dayStart = Math.floor((observedTimestamp + hongKongOffsetSeconds) / daySeconds) * daySeconds - hongKongOffsetSeconds;
+      const dayTimestamp = dayStart + daySeconds / 2;
+      const previous = latestByDay.get(dayTimestamp);
+      if (!previous || observedTimestamp > previous.observedTimestamp) {
+        latestByDay.set(dayTimestamp, {
+          observedTimestamp,
+          point: {
+            ...point,
+            timestamp: dayTimestamp,
+            date: new Date(dayTimestamp * 1000).toISOString(),
+          },
+        });
+      }
+    }
+    return {
+      ...series,
+      points: [...latestByDay.values()]
+        .sort((a, b) => a.point.timestamp - b.point.timestamp)
+        .map(({ point }) => point),
+    };
+  });
+  const allDays = [...new Set(normalized.flatMap((series) => series.points.map((point) => point.timestamp)))]
+    .sort((a, b) => a - b);
+  const visibleDays = new Set(sampleEvenly(allDays, limit));
+  return normalized.map((series) => ({
+    ...series,
+    points: series.points.filter((point) => visibleDays.has(point.timestamp)),
+  }));
+}
+
+function sampleEvenly(values, limit) {
+  if (values.length <= limit || limit <= 0) return values;
+  if (limit === 1) return [values.at(-1)];
+  const sampled = [];
+  const step = (values.length - 1) / (limit - 1);
+  for (let index = 0; index < limit; index += 1) sampled.push(values[Math.round(index * step)]);
+  return [...new Set(sampled)];
+}
+
+function nearestValue(values, target, project = (value) => value) {
+  return values.reduce((nearest, value) =>
+    Math.abs(project(value) - target) < Math.abs(project(nearest) - target) ? value : nearest,
+  values[0]);
 }
 
 function downsamplePoints(points, limit) {
@@ -731,7 +1030,7 @@ function refreshCalculatorSources() {
 function updateChartSelectionNote() {
   const bankCount = [...state.chartSources].filter((id) => id.startsWith("bank_")).length;
   setText("#chart-bank-count", String(bankCount));
-  elements.chartSelectionNote.textContent = `已选择 ${state.chartSources.size} 个数据源。折线图可同时比较；柱状图以半透明颜色叠层展示，汇率数值不会相加。`;
+  elements.chartSelectionNote.textContent = `已选择 ${state.chartSources.size} 个数据源。折线图可同时比较；柱状图按香港日期共用一个柱位，并以半透明颜色叠层区分，汇率数值不会相加。`;
 }
 
 function updateBaseChrome() {
@@ -752,10 +1051,6 @@ function updatePairChrome() {
   Array.from(elements.quoteSelect.options).forEach((option) => {
     option.disabled = option.value === state.base;
   });
-  setText("#comparison-base", state.base);
-  setText("#comparison-quote", state.quote);
-  setText("#comparison-unit-base", state.base);
-  setText("#comparison-unit-quote", state.quote);
   setText("#banks-base", state.base);
   setText("#banks-quote", state.quote);
   setText("#banks-sell", state.base);
@@ -811,7 +1106,7 @@ function formatAmount(value, quote) {
 }
 
 function formatDate(value) {
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", timeZone: "UTC" }).format(new Date(value));
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", timeZone: "Asia/Hong_Kong" }).format(new Date(value));
 }
 
 function formatDateTime(value) {
