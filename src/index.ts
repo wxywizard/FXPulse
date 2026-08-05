@@ -639,6 +639,9 @@ export async function handleHistory(url: URL, env: Env): Promise<Response> {
           let marketSeries = null;
           try {
             marketSeries = await readD1History(env.DB, base, quote, rawDays);
+            if (marketSeries && !coversRequestedHistoryWindow(marketSeries.points, rawDays)) {
+              marketSeries = null;
+            }
           } catch (error) {
             console.warn("D1 history unavailable; falling back to reference history", error);
           }
@@ -717,6 +720,29 @@ export async function handleHistory(url: URL, env: Env): Promise<Response> {
     console.error("History API failed", error);
     return json({ error: "Historical reference rates are temporarily unavailable" }, 503, 30);
   }
+}
+
+export function coversRequestedHistoryWindow(
+  points: Array<{ timestamp: number }>,
+  days: number,
+  nowEpoch = Math.floor(Date.now() / 1000),
+): boolean {
+  const daySeconds = 86_400;
+  const hongKongOffsetSeconds = 8 * 3_600;
+  const validTimestamps = points
+    .map((point) => Number(point.timestamp))
+    .filter(Number.isFinite);
+  const hongKongDays = new Set(
+    validTimestamps.map((timestamp) =>
+      Math.floor((timestamp + hongKongOffsetSeconds) / daySeconds)
+    ),
+  );
+  if (hongKongDays.size < 2) return false;
+
+  const earliestTimestamp = Math.min(...validTimestamps);
+  const requestedStart = nowEpoch - days * daySeconds;
+  const coverageTolerance = Math.min(2, Math.max(1, Math.floor(days * 0.15))) * daySeconds;
+  return earliestTimestamp <= requestedStart + coverageTolerance;
 }
 
 interface HistorySourceMetadata {

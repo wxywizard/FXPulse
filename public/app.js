@@ -16,6 +16,7 @@ const CODES = Object.keys(CURRENCIES);
 const initial = JSON.parse(document.querySelector("#fxpulse-data").textContent);
 const OVERVIEW_GLOBAL_STORAGE_KEY = "fxpulse.overview.global-sources.v1";
 const OVERVIEW_CARD_STORAGE_KEY = "fxpulse.overview.card-sources.v1";
+const HISTORY_API_VERSION = "coverage-v2";
 const SOURCE_CATALOG = Array.isArray(initial.sourceCatalog) ? initial.sourceCatalog : [];
 const state = {
   base: initial.base,
@@ -204,17 +205,7 @@ function bindEvents() {
     loadHistory();
   });
 
-  document.querySelector(".chart-type-switcher").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-chart-type]");
-    if (!button) return;
-    state.chartType = button.dataset.chartType;
-    document.querySelectorAll("[data-chart-type]").forEach((item) => {
-      const active = item === button;
-      item.classList.toggle("active", active);
-      item.setAttribute("aria-pressed", String(active));
-    });
-    if (state.history) renderHistory(state.history);
-  });
+  bindChartTypeSwitcher();
 
   elements.chartSourcePicker.addEventListener("change", (event) => {
     const input = event.target.closest("[data-history-source]");
@@ -255,6 +246,20 @@ function bindEvents() {
     loadHistory();
     loadComparison();
     loadBanks();
+  });
+}
+
+function bindChartTypeSwitcher() {
+  document.querySelector(".chart-type-switcher").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-chart-type]");
+    if (!button) return;
+    state.chartType = button.dataset.chartType;
+    document.querySelectorAll("[data-chart-type]").forEach((item) => {
+      const active = item === button;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-pressed", String(active));
+    });
+    if (state.history) renderHistory(state.history);
   });
 }
 
@@ -395,6 +400,7 @@ async function loadHistory() {
       quote: state.quote,
       days: String(state.days),
       sources: [...state.chartSources].join(","),
+      v: HISTORY_API_VERSION,
     });
     const response = await fetch(`/api/history?${query}`, {
       headers: { accept: "application/json" },
@@ -732,7 +738,8 @@ function renderChart(seriesList, chartType) {
         points: downsamplePoints(series.points, 260),
       }));
   const allPoints = plottedSeries.flatMap((series) => series.points);
-  if (allPoints.length < 2) throw new Error("历史数据点不足");
+  const minimumPoints = chartType === "bar" ? 1 : 2;
+  if (allPoints.length < minimumPoints) throw new Error("历史数据点不足");
   const width = Math.max(360, Math.round(elements.chart.clientWidth || 960));
   const height = window.innerWidth <= 720 ? 300 : 340;
   const padding = { top: 24, right: 28, bottom: 42, left: 74 };

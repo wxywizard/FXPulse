@@ -21,7 +21,12 @@ import {
   readProviderHistory,
 } from "../src/provider-rates";
 import { renderPage, renderSitemap } from "../src/template";
-import { handleHistory, handleOverview, parseOverviewSourceIds } from "../src/index";
+import {
+  coversRequestedHistoryWindow,
+  handleHistory,
+  handleOverview,
+  parseOverviewSourceIds,
+} from "../src/index";
 
 describe("currency validation", () => {
   it("accepts supported codes case-insensitively", () => {
@@ -143,6 +148,44 @@ describe("overview source validation", () => {
 });
 
 describe("layered bar chart dates", () => {
+  it("switches to the bar renderer when the bar button is clicked", () => {
+    const helperStart = appScript.indexOf("function bindChartTypeSwitcher");
+    const helperEnd = appScript.indexOf("async function swapPair", helperStart);
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const createBinding = new Function(
+      "document",
+      "state",
+      "renderHistory",
+      `${appScript.slice(helperStart, helperEnd)}; return bindChartTypeSwitcher;`,
+    );
+    const listeners = new Map<string, (event: unknown) => void>();
+    const switcher = {
+      addEventListener: (type: string, listener: (event: unknown) => void) => listeners.set(type, listener),
+    };
+    const button = (chartType: "line" | "bar") => ({
+      dataset: { chartType },
+      classList: { toggle: vi.fn() },
+      setAttribute: vi.fn(),
+    });
+    const lineButton = button("line");
+    const barButton = button("bar");
+    const documentStub = {
+      querySelector: () => switcher,
+      querySelectorAll: () => [lineButton, barButton],
+    };
+    const stateStub = { chartType: "line", history: { series: [] } };
+    const renderHistory = vi.fn();
+
+    createBinding(documentStub, stateStub, renderHistory)();
+    listeners.get("click")?.({ target: { closest: () => barButton } });
+
+    expect(stateStub.chartType).toBe("bar");
+    expect(renderHistory).toHaveBeenCalledWith(stateStub.history);
+    expect(barButton.classList.toggle).toHaveBeenCalledWith("active", true);
+    expect(barButton.setAttribute).toHaveBeenCalledWith("aria-pressed", "true");
+  });
+
   it("places different source timestamps from the same Hong Kong day on one bar position", () => {
     const helperStart = appScript.indexOf("function renderBarSeries");
     const helperEnd = appScript.indexOf("function downsamplePoints", helperStart);
@@ -228,6 +271,10 @@ describe("layered bar chart dates", () => {
     const firstDay = svg.slice(0, svg.indexOf("</g>") + 4);
     expect(firstDay).toContain('data-source="market"');
     expect(firstDay).toContain('data-source="wise"');
+  });
+
+  it("allows one Hong Kong day to render as a single bar", () => {
+    expect(appScript).toContain('const minimumPoints = chartType === "bar" ? 1 : 2');
   });
 });
 
@@ -577,14 +624,73 @@ describe("search surfaces", () => {
     expect(html).toContain("历史数据源（可多选）");
     expect(html).toContain("本站数据须经书面授权方可使用");
     expect(html).toContain("未经授权使用将被视为侵权");
+    expect(html).not.toContain("并提供指向本项目公开仓库的可点击链接");
+    expect(html).not.toContain(">https://github.com/wxywizard/FXPulse <span");
     expect(html).toContain("仅能登录后查看或没有可靠第三方实时来源的银行不会接入");
     expect(html).toContain("https://github.com/wxywizard/FXPulse");
   });
 });
 
 describe("multi-source history API", () => {
+  it("requires D1 history to span the selected window and at least two Hong Kong days", () => {
+    const now = Date.parse("2026-08-05T12:00:00Z") / 1000;
+    const sameDay = [0, 1, 2, 3].map((hours) => ({
+      timestamp: now - hours * 3_600,
+    }));
+    const covered = [
+      { timestamp: now - 7 * 86_400 },
+      { timestamp: now - 6 * 86_400 },
+      { timestamp: now },
+    ];
+    expect(coversRequestedHistoryWindow(sameDay, 7, now)).toBe(false);
+    expect(coversRequestedHistoryWindow(covered, 7, now)).toBe(true);
+  });
+
+  it("falls back to Frankfurter when D1 only contains intraday points", async () => {
+    const now = Date.parse("2026-08-05T12:00:00Z") / 1000;
+    const intradayTimestamps = [0, 1, 2, 3].map((hours) => now - hours * 3_600);
+    const marketRows = intradayTimestamps.flatMap((observed_at, index) => [
+      { quote: "AUD", rate: 1.42 + index * 0.001, observed_at },
+      { quote: "USD", rate: 1, observed_at },
+    ]);
+    const db = {
+      prepare: () => ({
+        bind: () => ({ all: async () => ({ results: marketRows }) }),
+      }),
+    } as never;
+    const fetcher = vi.fn(async () => Response.json([
+      { date: "2026-07-30", base: "AUD", quote: "USD", rate: 0.702 },
+      { date: "2026-08-01", base: "AUD", quote: "USD", rate: 0.703 },
+      { date: "2026-08-04", base: "AUD", quote: "USD", rate: 0.704 },
+    ]));
+    vi.stubGlobal("fetch", fetcher);
+
+    try {
+      const response = await handleHistory(
+        new URL("https://fxpulse.example/api/history?base=AUD&quote=USD&days=7&sources=market"),
+        { DB: db } as never,
+      );
+      const payload = (await response.json()) as {
+        series: Array<{ provider: string; frequency: string; points: unknown[] }>;
+      };
+      expect(response.status).toBe(200);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(payload.series[0]?.provider).toContain("Frankfurter");
+      expect(payload.series[0]?.frequency).toBe("daily");
+      expect(payload.series[0]?.points).toHaveLength(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns independent market, Wise and bank series without substituting missing banks", async () => {
-    const timestamps = [1_785_830_000, 1_785_833_600, 1_785_837_200, 1_785_840_800];
+    const now = Math.floor(Date.now() / 1000);
+    const timestamps = [
+      now - 7 * 86_400,
+      now - 5 * 86_400,
+      now - 3 * 86_400,
+      now,
+    ];
     const marketRows = timestamps.flatMap((observed_at, index) => [
       { quote: "AUD", rate: 1.42 + index * 0.001, observed_at },
       { quote: "USD", rate: 1, observed_at },
@@ -618,7 +724,7 @@ describe("multi-source history API", () => {
 
     const response = await handleHistory(
       new URL(
-        "https://fxpulse.example/api/history?base=AUD&quote=USD&days=30&sources=market,wise,hsbc_public,bank_boc",
+        "https://fxpulse.example/api/history?base=AUD&quote=USD&days=7&sources=market,wise,hsbc_public,bank_boc",
       ),
       { DB: db } as never,
     );

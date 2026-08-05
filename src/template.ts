@@ -8,7 +8,7 @@ import {
 import type { CurrentSnapshot } from "./rates";
 import { HONG_KONG_BANKS } from "./bank-rates";
 
-const ASSET_VERSION = "20260805-overview-config-v1";
+const ASSET_VERSION = "20260805-chart-history-v1";
 
 interface PageOptions {
   origin: string;
@@ -291,8 +291,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
     <section class="authorization-note" aria-labelledby="authorization-title">
       <span class="section-kicker">DATA USE &amp; AUTHORIZATION</span>
       <h2 id="authorization-title">本站数据须经书面授权方可使用</h2>
-      <p>未经 FXPulse 权利方书面授权，不得抓取、复制、镜像、转载、分发、转售、商业使用本站数据或整理结果；未经授权使用将被视为侵权。获得授权后仍必须在显著位置标注数据来自 FXPulse，并提供指向本项目公开仓库的可点击链接。</p>
-      <a href="https://github.com/wxywizard/FXPulse" target="_blank" rel="noopener noreferrer">https://github.com/wxywizard/FXPulse <span aria-hidden="true">↗</span></a>
+      <p>未经 FXPulse 权利方书面授权，不得抓取、复制、镜像、转载、分发、转售、商业使用本站数据或整理结果；未经授权使用将被视为侵权。获得授权后仍必须在显著位置标注数据来自 FXPulse。</p>
     </section>
   </main>
 
