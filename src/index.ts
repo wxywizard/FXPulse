@@ -13,11 +13,24 @@ import {
   readD1History,
   storeSnapshot,
 } from "./rates";
+import {
+  collectWiseUsdQuotes,
+  fetchWisePair,
+  parseHsbcDepositPlusInput,
+  percentDifference,
+  readLatestProviderQuote,
+  storeProviderQuote,
+  storeProviderQuotes,
+  type ProviderId,
+  type ProviderRateQuote,
+} from "./provider-rates";
 import { renderLlmsTxt, renderPage, renderSitemap } from "./template";
 
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  WISE_API_TOKEN?: string;
+  HSBC_INGEST_TOKEN?: string;
 }
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -52,6 +65,14 @@ export default {
 
     if (url.pathname === "/api/rates") {
       return handleCurrentRates(url);
+    }
+
+    if (url.pathname === "/api/compare") {
+      return handleComparison(url, env, ctx);
+    }
+
+    if (url.pathname === "/api/ingest/hsbc") {
+      return handleHsbcIngest(request, env);
     }
 
     if (url.pathname === "/api/history") {
@@ -99,7 +120,7 @@ export default {
     return secure(assetResponse);
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
         const snapshot = await fetchCurrentSnapshot("USD");
@@ -109,6 +130,22 @@ export default {
           sourceUpdatedAt: snapshot.sourceUpdatedAt,
           currencies: CURRENCY_CODES.length,
         });
+
+        if (env.WISE_API_TOKEN && new Date(controller.scheduledTime).getUTCMinutes() === 0) {
+          const wiseQuotes = await collectWiseUsdQuotes(env.WISE_API_TOKEN);
+          await storeProviderQuotes(env.DB, wiseQuotes);
+          console.log("Stored Wise snapshots", { currencies: wiseQuotes.length });
+        }
+
+        const cutoff = snapshot.fetchedAt - 400 * 86_400;
+        try {
+          await env.DB
+            .prepare("DELETE FROM provider_rate_snapshots WHERE observed_at < ?1")
+            .bind(cutoff)
+            .run();
+        } catch (error) {
+          console.warn("Provider snapshot cleanup skipped", error);
+        }
       })(),
     );
   },
@@ -135,6 +172,125 @@ async function handleCurrentRates(url: URL): Promise<Response> {
   } catch (error) {
     console.error("Current-rate API failed", error);
     return json({ error: "Current reference rates are temporarily unavailable" }, 503, 30);
+  }
+}
+
+async function handleComparison(url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const pair = parseApiPair(url);
+  if (pair instanceof Response) return pair;
+  const { base, quote } = pair;
+
+  try {
+    const liveWisePromise: Promise<ProviderRateQuote | null> = env.WISE_API_TOKEN
+      ? fetchWisePair(base, quote, env.WISE_API_TOKEN).catch((error) => {
+          console.warn("Wise live quote unavailable; using archive when possible", error);
+          return null;
+        })
+      : Promise.resolve(null);
+    const [marketSnapshot, storedWise, hsbc, liveWise] = await Promise.all([
+      fetchCurrentSnapshot(base),
+      safeReadProviderQuote(env.DB, "wise", base, quote),
+      safeReadProviderQuote(env.DB, "hsbc_deposit_plus", base, quote),
+      liveWisePromise,
+    ]);
+    const marketRate = marketSnapshot.rates[quote];
+
+    const wise = liveWise ?? storedWise;
+    let wiseReason = env.WISE_API_TOKEN
+      ? "Wise 官方 API 暂时不可用，且没有可用归档"
+      : "尚未配置 Wise 官方合作方 API 凭据";
+    if (liveWise) {
+      ctx.waitUntil(
+        storeProviderQuote(env.DB, liveWise).catch((error) =>
+          console.warn("Wise snapshot store failed", error),
+        ),
+      );
+      wiseReason = "";
+    }
+
+    const sources = [
+      {
+        id: "market",
+        label: "公共市场参考价",
+        rateType: "reference",
+        status: "available",
+        rate: marketRate,
+        differenceFromMarketPct: 0,
+        sourceUpdatedAt: new Date(marketSnapshot.sourceUpdatedAt * 1000).toISOString(),
+        observedAt: new Date(marketSnapshot.fetchedAt * 1000).toISOString(),
+        provider: marketSnapshot.provider,
+        providerUrl: marketSnapshot.providerUrl,
+        reason: null,
+      },
+      serializeProviderSource(
+        "wise",
+        wise,
+        marketRate,
+        "Wise 中间价",
+        "https://wise.com/gb/currency-converter/",
+        wiseReason,
+      ),
+      serializeProviderSource(
+        "hsbc_deposit_plus",
+        hsbc,
+        marketRate,
+        "汇丰 Deposit Plus 现货参考价",
+        "https://www.hsbc.com.hk/investments/products/structured/deposit-plus/",
+        "尚未通过安全采集通道导入该币种对的汇丰 App 报价",
+      ),
+    ];
+
+    return json(
+      {
+        base,
+        quote,
+        unit: 1,
+        direction: `1 ${base} = x ${quote}`,
+        sources,
+        interpretation:
+          "三列均按同一方向比较。公共市场价是基准；Wise 为官方中间价；汇丰为 Deposit Plus 页面中的 exchangeSpotRate，不是 conversionRate 或保证成交价。",
+      },
+      200,
+      60,
+    );
+  } catch (error) {
+    console.error("Rate comparison API failed", error);
+    return json({ error: "Rate comparison is temporarily unavailable" }, 503, 30);
+  }
+}
+
+async function handleHsbcIngest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+  if (!env.HSBC_INGEST_TOKEN) {
+    return json({ error: "HSBC ingestion is not configured" }, 503);
+  }
+
+  const authorization = request.headers.get("authorization") ?? "";
+  const suppliedToken = authorization.replace(/^Bearer\s+/i, "");
+  if (!suppliedToken || !(await secureTokenEquals(suppliedToken, env.HSBC_INGEST_TOKEN))) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+
+  try {
+    const payload = await request.json();
+    const quote = parseHsbcDepositPlusInput(payload);
+    await storeProviderQuote(env.DB, quote);
+    return json(
+      {
+        status: "stored",
+        provider: quote.provider,
+        base: quote.base,
+        quote: quote.quote,
+        rate: quote.rate,
+        sourceUpdatedAt: new Date(quote.sourceUpdatedAt * 1000).toISOString(),
+      },
+      201,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid quote payload";
+    return json({ error: message }, 400);
   }
 }
 
@@ -184,6 +340,88 @@ function parsePagePair(pathname: string): { base: CurrencyCode; quote: CurrencyC
   const quote = normalizeCurrency(rawQuote);
   if (base === quote) return { base, quote: defaultQuote(base) };
   return { base, quote };
+}
+
+function parseApiPair(url: URL): { base: CurrencyCode; quote: CurrencyCode } | Response {
+  const rawBase = url.searchParams.get("base") ?? "HKD";
+  const rawQuote = url.searchParams.get("quote") ?? "USD";
+  if (!isCurrencyCode(rawBase) || !isCurrencyCode(rawQuote)) {
+    return json({ error: "Unsupported currency pair" }, 400);
+  }
+  const base = normalizeCurrency(rawBase);
+  const quote = normalizeCurrency(rawQuote);
+  if (base === quote) return json({ error: "Base and quote must be different" }, 400);
+  return { base, quote };
+}
+
+async function safeReadProviderQuote(
+  db: D1Database,
+  provider: ProviderId,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+): Promise<ProviderRateQuote | null> {
+  try {
+    return await readLatestProviderQuote(db, provider, base, quote);
+  } catch (error) {
+    console.warn(`Stored ${provider} quote unavailable`, error);
+    return null;
+  }
+}
+
+function serializeProviderSource(
+  id: ProviderId,
+  quote: ProviderRateQuote | null,
+  marketRate: number,
+  label: string,
+  providerUrl: string,
+  unavailableReason: string,
+): Record<string, unknown> {
+  if (!quote) {
+    return {
+      id,
+      label,
+      rateType: id === "wise" ? "mid_market" : "deposit_plus_spot",
+      status: "unavailable",
+      rate: null,
+      differenceFromMarketPct: null,
+      sourceUpdatedAt: null,
+      observedAt: null,
+      provider: id === "wise" ? "Wise Platform" : "HSBC Hong Kong App",
+      providerUrl,
+      reason: unavailableReason,
+    };
+  }
+
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - quote.sourceUpdatedAt);
+  return {
+    id: quote.provider,
+    label,
+    rateType: quote.rateType,
+    status: ageSeconds <= 900 ? "available" : "stale",
+    rate: quote.rate,
+    differenceFromMarketPct: percentDifference(quote.rate, marketRate),
+    sourceUpdatedAt: new Date(quote.sourceUpdatedAt * 1000).toISOString(),
+    observedAt: new Date(quote.observedAt * 1000).toISOString(),
+    provider: quote.provider === "wise" ? "Wise Platform" : "HSBC Hong Kong App",
+    providerUrl,
+    reason: ageSeconds <= 900 ? null : "最近一条归档已超过 15 分钟，请核对更新时间",
+  };
+}
+
+async function secureTokenEquals(left: string, right: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [leftHash, rightHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(left)),
+    crypto.subtle.digest("SHA-256", encoder.encode(right)),
+  ]);
+  const leftBytes = new Uint8Array(leftHash);
+  const rightBytes = new Uint8Array(rightHash);
+  if (leftBytes.length !== rightBytes.length) return false;
+  let difference = 0;
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    difference |= leftBytes[index]! ^ rightBytes[index]!;
+  }
+  return difference === 0;
 }
 
 function json(payload: unknown, status = 200, maxAge = 0): Response {

@@ -13,16 +13,17 @@
 | D1 迁移目录 | `migrations/` |
 | 定时任务 | `*/15 * * * *`，按 UTC 执行 |
 | Node.js | 22 或更高版本 |
-| 生产密钥 | 当前版本不需要行情 API Key |
-| 当前价来源 | ExchangeRate-API 公共接口 |
+| 生产密钥 | `WISE_API_TOKEN`（可选）、`HSBC_INGEST_TOKEN`（启用汇丰导入时必需） |
+| 当前价来源 | ExchangeRate-API、Wise 官方 Rate API、汇丰安全导入 |
 | 历史价来源 | D1 优先，Frankfurter 冷启动降级 |
 
 首次部署必须完成以下四项：
 
 1. 创建 D1 数据库。
 2. 将真实 `database_id` 写入 `wrangler.jsonc`。
-3. 执行远端数据库迁移。
-4. 部署 Worker 并验证 Cron 写入。
+3. 执行远端数据库迁移（包含公共市场与多来源报价表）。
+4. 部署 Worker并按需配置 Wise/汇丰 Secrets。
+5. 验证 Cron、三源比较和汇丰安全导入。
 
 ## 2. 前置条件
 
@@ -122,10 +123,10 @@ npx wrangler d1 migrations list fxpulse-db --remote
 
 ```bash
 npx wrangler d1 execute fxpulse-db --remote \
-  --command "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'rate_snapshots';"
+  --command "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('rate_snapshots', 'provider_rate_snapshots');"
 ```
 
-输出中应包含 `rate_snapshots`。
+输出中应包含 `rate_snapshots` 和 `provider_rate_snapshots`。
 
 > `npm run db:migrate:local` 只操作本地开发数据库，不能替代带 `--remote` 的生产迁移。
 
@@ -142,6 +143,29 @@ https://fxpulse.<your-subdomain>.workers.dev
 ```
 
 `wrangler.jsonc` 中已经声明 D1、静态资源、Cron 和可观测性配置，部署时会一并应用。
+
+### 3.7 配置可选数据源 Secrets
+
+Wise 官方报价需要合作方 API Token：
+
+```bash
+npx wrangler secret put WISE_API_TOKEN
+```
+
+汇丰脱敏导入需要独立的随机 Token：
+
+```bash
+openssl rand -hex 32
+npx wrangler secret put HSBC_INGEST_TOKEN
+```
+
+如果使用 Cloudflare Dashboard：
+
+```text
+Workers & Pages → fxpulse → Settings → Variables and Secrets → Add → Secret
+```
+
+不要把 Token 填为普通明文 Variable，也不要写入 `wrangler.jsonc`、GitHub 代码或构建日志。未配置 Wise Token 时网站仍可正常运行，但 Wise 列会显示“待接入”；未配置汇丰导入 Token 时该列等待采集。
 
 ## 4. 上线验证
 
@@ -175,7 +199,15 @@ curl -fsS "<ORIGIN>/api/history?base=HKD&quote=USD&days=30"
 
 首次上线时 D1 快照不足，接口会自动使用 Frankfurter 日频历史数据；这属于正常冷启动行为。D1 累积至少 4 个完整时间点后，会优先返回 FXPulse 自有快照。
 
-### 4.4 页面、SEO 与 GEO 文件
+### 4.4 三源报价
+
+```bash
+curl -fsS "<ORIGIN>/api/compare?base=AUD&quote=USD"
+```
+
+响应应包含 `market`、`wise`、`hsbc_deposit_plus` 三个来源。尚未配置/采集的来源必须返回 `status: unavailable` 和 `rate: null`，不能复制公共市场价。
+
+### 4.5 页面、SEO 与 GEO 文件
 
 逐项访问：
 
@@ -190,7 +222,9 @@ curl -fsS "<ORIGIN>/api/history?base=HKD&quote=USD&days=30"
 检查标准：
 
 - 首页和币种对页面可以正常打开；
-- 币种切换、金额换算、7/15/30/90/365 天走势图可用；
+- `USD/AUD ↔ AUD/USD` 一键反转可用，URL 和所有报价方向同步更新；
+- 金额计算器可用，金额输入不改变下方按 1 单位展示的汇率；
+- 三源对比和 7/15/30/90/365 天走势图可用；
 - `sitemap.xml` 中的 URL 使用最终生产域名；
 - `robots.txt` 指向同域名的 Sitemap；
 - `llms.txt` 可以直接访问。
@@ -230,7 +264,14 @@ npx wrangler d1 execute fxpulse-db --remote \
   --command "SELECT COUNT(*) AS rows, datetime(MAX(observed_at), 'unixepoch') AS latest_utc FROM rate_snapshots;"
 ```
 
-首次成功采集会写入 11 行数据。`latest_utc` 应接近最近一个 Cron 执行时间。
+首次成功采集会写入 11 行公共市场数据。`latest_utc` 应接近最近一个 Cron 执行时间。配置 Wise Token 后，每小时整点还会向 `provider_rate_snapshots` 写入最多 10 条 USD 基准 Wise 快照。
+
+检查多来源归档：
+
+```bash
+npx wrangler d1 execute fxpulse-db --remote \
+  --command "SELECT provider, COUNT(*) AS rows, datetime(MAX(source_updated_at), 'unixepoch') AS latest_utc FROM provider_rate_snapshots GROUP BY provider;"
+```
 
 ### 5.3 本地触发 scheduled handler
 
@@ -357,6 +398,8 @@ Workers & Pages → fxpulse → Logs
 建议重点关注：
 
 - `/api/rates` 的 5xx 响应；
+- `/api/compare` 中 Wise/汇丰的 `unavailable` 或 `stale` 状态；
+- `/api/ingest/hsbc` 的 401/400 异常增长；
 - `/api/history` 的 5xx 响应和 D1 降级日志；
 - Cron 是否连续失败；
 - D1 中 `MAX(observed_at)` 是否持续更新；
@@ -415,6 +458,9 @@ npx wrangler d1 time-travel restore fxpulse-db \
 | 部署时找不到 D1 | 确认 `database_id` 已替换、数据库属于当前 `wrangler whoami` 账户、绑定名仍为 `DB`。 |
 | 迁移成功但生产表不存在 | 确认命令带有 `--remote`，并检查是否误操作了本地 D1。 |
 | 首页正常但当前价返回 503 | 使用 `wrangler tail` 查看上游请求错误；当前价来自 ExchangeRate-API 公共接口。 |
+| Wise 一直显示待接入 | 确认 `WISE_API_TOKEN` 是 Secret、来自 Wise 官方合作方能力，并在修改 Secret 后重新部署/重试。 |
+| 汇丰一直显示待接入 | 确认已创建 `provider_rate_snapshots`、设置 `HSBC_INGEST_TOKEN`，并成功导入对应币种对。 |
+| 汇丰导入返回 401 | `Authorization` 必须使用 `Bearer <HSBC_INGEST_TOKEN>`，不能使用汇丰 `dspSession`。 |
 | 历史接口显示日频数据 | D1 冷启动或快照不足 4 个时间点时会使用 Frankfurter，属于预期降级。 |
 | Cron 上线后没有立即执行 | 新增或修改 Cron 最多可能需要约 15 分钟传播，随后检查 Trigger Events、日志和 D1。 |
 | 自定义域名打不开 | 确认域名 Zone 在同一 Cloudflare 账户、Custom Domain 状态正常、证书已签发。 |
@@ -430,4 +476,3 @@ npx wrangler d1 time-travel restore fxpulse-db \
 - [Cloudflare Worker Rollback](https://developers.cloudflare.com/workers/wrangler/commands/workers/#rollback)
 - [Cloudflare D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 - [Cloudflare Workers GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
-

@@ -19,14 +19,22 @@ const state = {
   quote: initial.quote,
   days: 30,
   snapshot: initial.snapshot,
+  comparison: null,
   historyController: null,
+  comparisonController: null,
 };
 
 const elements = {
   baseSelect: document.querySelector("#base-currency"),
+  quoteSelect: document.querySelector("#quote-currency"),
   amount: document.querySelector("#base-amount"),
+  convertedAmount: document.querySelector("#converted-amount"),
+  calculatorRate: document.querySelector("#calculator-rate"),
+  swapPair: document.querySelector("#swap-pair"),
   grid: document.querySelector("#rate-grid"),
   rateError: document.querySelector("#rate-error"),
+  comparisonGrid: document.querySelector("#comparison-grid"),
+  comparisonNote: document.querySelector("#comparison-note"),
   chart: document.querySelector("#chart-wrap"),
   historySource: document.querySelector("#history-source"),
   sourceUpdated: document.querySelector("#source-updated"),
@@ -42,6 +50,7 @@ function init() {
     loadCurrentRates();
   }
   loadHistory();
+  loadComparison();
 }
 
 function bindEvents() {
@@ -54,10 +63,33 @@ function bindEvents() {
     updateBaseChrome();
     updatePairChrome();
     updateUrl();
-    await Promise.all([loadCurrentRates(), loadHistory()]);
+    await Promise.all([loadCurrentRates(), loadHistory(), loadComparison()]);
   });
 
   elements.amount.addEventListener("input", updateConversion);
+
+  elements.quoteSelect.addEventListener("change", (event) => {
+    const nextQuote = event.target.value;
+    if (!CURRENCIES[nextQuote] || nextQuote === state.base) {
+      elements.quoteSelect.value = state.quote;
+      return;
+    }
+    state.quote = nextQuote;
+    updatePairChrome();
+    updateUrl();
+    Promise.all([loadHistory(), loadComparison()]);
+  });
+
+  elements.swapPair.addEventListener("click", async () => {
+    const previousBase = state.base;
+    state.base = state.quote;
+    state.quote = previousBase;
+    state.snapshot = null;
+    updateBaseChrome();
+    updatePairChrome();
+    updateUrl();
+    await Promise.all([loadCurrentRates(), loadHistory(), loadComparison()]);
+  });
 
   elements.grid.addEventListener("click", (event) => {
     const card = event.target.closest("[data-currency]");
@@ -66,7 +98,7 @@ function bindEvents() {
     updateActiveCard();
     updatePairChrome();
     updateUrl();
-    loadHistory();
+    Promise.all([loadHistory(), loadComparison()]);
     document.querySelector("#trend").scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
@@ -91,12 +123,15 @@ function bindEvents() {
     const baseChanged = nextBase !== state.base;
     state.base = nextBase;
     state.quote = nextQuote;
+    if (baseChanged) state.snapshot = null;
     elements.baseSelect.value = state.base;
+    elements.quoteSelect.value = state.quote;
     updateBaseChrome();
     updatePairChrome();
     if (baseChanged) loadCurrentRates();
     else updateActiveCard();
     loadHistory();
+    loadComparison();
   });
 }
 
@@ -118,6 +153,32 @@ async function loadCurrentRates() {
     setDataStatus("参考价暂时不可用", "error");
   } finally {
     elements.grid.classList.remove("loading");
+  }
+}
+
+async function loadComparison() {
+  if (state.comparisonController) state.comparisonController.abort();
+  state.comparisonController = new AbortController();
+  elements.comparisonGrid.classList.add("loading");
+  elements.comparisonNote.textContent = "正在加载各来源的可用报价与更新时间。";
+
+  try {
+    const query = new URLSearchParams({ base: state.base, quote: state.quote });
+    const response = await fetch(`/api/compare?${query}`, {
+      headers: { accept: "application/json" },
+      signal: state.comparisonController.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "三源报价暂时不可用");
+    state.comparison = payload;
+    renderComparison(payload);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    elements.comparisonGrid.innerHTML = `<div class="comparison-error"><strong>暂时无法加载三源对比</strong><span>${escapeHtml(error.message)}</span><button type="button" id="retry-comparison">重试</button></div>`;
+    elements.comparisonNote.textContent = "没有使用其他来源补造 Wise 或汇丰报价。";
+    document.querySelector("#retry-comparison")?.addEventListener("click", loadComparison);
+  } finally {
+    elements.comparisonGrid.classList.remove("loading");
   }
 }
 
@@ -161,8 +222,34 @@ function renderRates() {
       </button>`;
     })
     .join("");
-  document.querySelector("#rates-title").textContent = `1 ${state.base} 可以兑换`;
+  document.querySelector("#rates-title").textContent = `1 ${state.base} 的公共市场参考价`;
   updateConversion();
+}
+
+function renderComparison(payload) {
+  elements.comparisonGrid.innerHTML = payload.sources
+    .map((source) => {
+      const available = typeof source.rate === "number" && Number.isFinite(source.rate);
+      const statusLabel = source.status === "available" ? "可用" : source.status === "stale" ? "需更新" : "待接入";
+      const difference = typeof source.differenceFromMarketPct === "number"
+        ? source.id === "market"
+          ? "比较基准"
+          : `较公共市场价 ${source.differenceFromMarketPct >= 0 ? "+" : ""}${source.differenceFromMarketPct.toFixed(3)}%`
+        : source.reason || "当前没有可验证报价";
+      const rateText = available
+        ? `1 ${state.base} = ${formatRate(source.rate, state.quote)} ${state.quote}`
+        : "暂无报价";
+      const updated = source.sourceUpdatedAt ? formatSourceTime(source.sourceUpdatedAt) : "—";
+      return `<article class="source-card source-${escapeHtml(source.id)} ${escapeHtml(source.status)}">
+        <div class="source-card-head"><span>${escapeHtml(source.label)}</span><b>${statusLabel}</b></div>
+        <strong>${rateText}</strong>
+        <p>${escapeHtml(difference)}</p>
+        <small>更新时间：${escapeHtml(updated)}</small>
+        <a href="${escapeHtml(source.providerUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.provider)} <span aria-hidden="true">↗</span></a>
+      </article>`;
+    })
+    .join("");
+  elements.comparisonNote.textContent = payload.interpretation;
 }
 
 function renderChart(points) {
@@ -256,25 +343,24 @@ function updateStats(points) {
   changeElement.classList.toggle("positive", change >= 0);
   changeElement.classList.toggle("negative", change < 0);
   setText("#stat-pair", `${state.quote} / ${state.base}`);
-  updateConversion();
 }
 
 function updateConversion() {
   if (!state.snapshot?.rates) {
-    setText("#stat-converted", "—");
+    elements.convertedAmount.textContent = "—";
+    elements.calculatorRate.textContent = `1 ${state.base} = — ${state.quote}`;
     return;
   }
   const amount = Math.max(0, Number(elements.amount.value) || 0);
   const rate = state.snapshot.rates[state.quote];
-  setText("#stat-converted", `${formatAmount(amount * rate, state.quote)} ${state.quote}`);
+  elements.convertedAmount.textContent = formatAmount(amount * rate, state.quote);
+  elements.calculatorRate.textContent = `1 ${state.base} = ${formatRate(rate, state.quote)} ${state.quote}`;
 }
 
 function updateBaseChrome() {
   const meta = CURRENCIES[state.base];
   elements.baseSelect.value = state.base;
   setText("#base-flag", meta.flag);
-  setText("#base-symbol", meta.symbol);
-  setText("#base-code", state.base);
   renderRates();
   updatePairChrome();
 }
@@ -284,8 +370,19 @@ function updatePairChrome() {
   setText("#pair-quote", state.quote);
   setText("#pair-base-name", CURRENCIES[state.base].name);
   setText("#pair-quote-name", CURRENCIES[state.quote].name);
+  setText("#quote-flag", CURRENCIES[state.quote].flag);
+  elements.quoteSelect.value = state.quote;
+  Array.from(elements.quoteSelect.options).forEach((option) => {
+    option.disabled = option.value === state.base;
+  });
+  setText("#comparison-base", state.base);
+  setText("#comparison-quote", state.quote);
+  setText("#comparison-unit-base", state.base);
+  setText("#comparison-unit-quote", state.quote);
   setText("#stat-pair", `${state.quote} / ${state.base}`);
+  elements.swapPair.setAttribute("aria-label", `反转 ${state.base}/${state.quote} 为 ${state.quote}/${state.base}`);
   updateActiveCard();
+  updateConversion();
 }
 
 function updateActiveCard() {
@@ -341,6 +438,17 @@ function formatDateTime(value) {
     hour12: false,
     timeZone: "Asia/Hong_Kong",
   }).format(date);
+}
+
+function formatSourceTime(value) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Hong_Kong",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
 }
 
 function setText(selector, value) {

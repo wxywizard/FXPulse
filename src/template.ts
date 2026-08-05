@@ -7,6 +7,8 @@ import {
 } from "./currencies";
 import type { CurrentSnapshot } from "./rates";
 
+const ASSET_VERSION = "20260805-comparison-v1";
+
 interface PageOptions {
   origin: string;
   base: CurrencyCode;
@@ -20,7 +22,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   const canonicalPath = `/rates/${base.toLowerCase()}/${quote.toLowerCase()}`;
   const canonical = `${origin}${canonicalPath}`;
   const title = `${base}/${quote} 汇率与历史走势｜FXPulse`;
-  const description = `查看 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）最新市场参考汇率，以及过去 7、15、30、90、365 天走势。`;
+  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise 与汇丰 Deposit Plus 报价，并查看 7、15、30、90、365 天走势。`;
   const initialData = escapeScriptJson(
     JSON.stringify({ base, quote, snapshot, generatedAt: new Date().toISOString() }),
   );
@@ -47,7 +49,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   <link rel="canonical" href="${canonical}">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=${ASSET_VERSION}">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="FXPulse">
   <meta property="og:title" content="${title}">
@@ -67,54 +69,80 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <span>FX<span>Pulse</span></span>
     </a>
     <nav aria-label="主要导航">
-      <a href="#rates">汇率</a>
+      <a href="#compare">三源对比</a>
+      <a href="#rates">币种总览</a>
       <a href="#trend">趋势</a>
       <a href="#methodology">数据说明</a>
     </nav>
-    <span class="market-pill"><span></span>市场参考价</span>
+    <span class="market-pill"><span></span>三源报价对比</span>
   </header>
 
   <main id="main">
     <section class="hero" aria-labelledby="hero-title">
       <div class="eyebrow"><span>FX</span> 为香港外币用户而做</div>
       <h1 id="hero-title">外汇变化，<em>一眼看清。</em></h1>
-      <p>聚合汇丰香港 Deposit Plus 涉及的 11 种主要币种，快速比较当前市场参考价与近期趋势。</p>
+      <p>同一币种方向，对比公共市场、Wise 与汇丰 Deposit Plus 报价，再结合近期走势判断差异。</p>
       <div class="hero-meta">
         <span><b id="status-dot" class="status-dot ${snapshot ? "" : "pending"}"></b><span id="data-status">${snapshot ? "数据源正常" : "正在连接数据源"}</span></span>
         <span>提供方更新：<time id="source-updated">${updatedText}</time> HKT</span>
       </div>
     </section>
 
-    <section class="control-panel" aria-label="汇率换算控制">
-      <div class="control-group">
-        <label for="base-currency">我的基准币种</label>
-        <div class="select-wrap">
-          <span id="base-flag" aria-hidden="true">${baseMeta.flag}</span>
-          <select id="base-currency" aria-label="选择基准币种">
-            ${currencyOptions(base)}
-          </select>
+    <section class="converter" aria-labelledby="converter-title">
+      <div class="converter-heading">
+        <div>
+          <span class="section-kicker">CURRENCY CALCULATOR</span>
+          <h2 id="converter-title">金额换算器</h2>
+        </div>
+        <p>金额只用于本计算器，下方汇率始终按 1 个单位展示。</p>
+      </div>
+      <div class="converter-grid">
+        <div class="money-field">
+          <label for="base-amount">你有</label>
+          <div class="money-input">
+            <input id="base-amount" inputmode="decimal" type="number" min="0" step="any" value="1000" aria-label="输入换算金额">
+            <span class="currency-select">
+              <span id="base-flag" aria-hidden="true">${baseMeta.flag}</span>
+              <select id="base-currency" aria-label="选择换出币种">${currencyOptions(base)}</select>
+            </span>
+          </div>
+        </div>
+        <button id="swap-pair" class="swap-button" type="button" aria-label="反转 ${base}/${quote} 为 ${quote}/${base}" title="反转币种方向">
+          <span aria-hidden="true">⇄</span>
+        </button>
+        <div class="money-field result-field">
+          <label for="quote-currency">预计可得</label>
+          <div class="money-input result-input">
+            <output id="converted-amount" for="base-amount">—</output>
+            <span class="currency-select">
+              <span id="quote-flag" aria-hidden="true">${quoteMeta.flag}</span>
+              <select id="quote-currency" aria-label="选择换入币种">${currencyOptions(quote)}</select>
+            </span>
+          </div>
         </div>
       </div>
-      <div class="divider" aria-hidden="true"></div>
-      <div class="control-group amount-group">
-        <label for="base-amount">换算金额</label>
-        <div class="amount-wrap">
-          <span id="base-symbol">${baseMeta.symbol}</span>
-          <input id="base-amount" inputmode="decimal" type="number" min="0" step="any" value="10000" aria-label="换算金额">
-          <strong id="base-code">${base}</strong>
+      <p class="calculator-rate">按公共市场参考价估算 · <span id="calculator-rate">1 ${base} = — ${quote}</span></p>
+    </section>
+
+    <section id="compare" class="section comparison-section" aria-labelledby="comparison-title">
+      <div class="section-heading">
+        <div>
+          <span class="section-kicker">SAME PAIR · THREE SOURCES</span>
+          <h2 id="comparison-title"><span id="comparison-base">${base}</span>/<span id="comparison-quote">${quote}</span> 三源对比</h2>
         </div>
+        <p>统一按 1 <span id="comparison-unit-base">${base}</span> 兑换 <span id="comparison-unit-quote">${quote}</span> 展示</p>
       </div>
-      <div class="control-summary">
-        <span>覆盖币种</span>
-        <strong>11</strong>
+      <div id="comparison-grid" class="comparison-grid" aria-live="polite">
+        ${renderComparisonPlaceholders(base, quote)}
       </div>
+      <p id="comparison-note" class="comparison-note">正在加载各来源的可用报价与更新时间。</p>
     </section>
 
     <section id="rates" class="section rates-section" aria-labelledby="rates-title">
       <div class="section-heading">
         <div>
-          <span class="section-kicker">LATEST REFERENCE</span>
-          <h2 id="rates-title">1 ${base} 可以兑换</h2>
+          <span class="section-kicker">MARKET OVERVIEW</span>
+          <h2 id="rates-title">1 ${base} 的公共市场参考价</h2>
         </div>
         <p id="rates-caption">点击任一币种，查看历史走势</p>
       </div>
@@ -154,7 +182,6 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
           <div><dt>区间高点</dt><dd id="stat-high">—</dd></div>
           <div><dt>区间低点</dt><dd id="stat-low">—</dd></div>
           <div><dt>区间变化</dt><dd id="stat-change">—</dd></div>
-          <div><dt>兑换估算</dt><dd id="stat-converted">—</dd></div>
         </dl>
         <p>历史走势为参考汇率变化，不代表汇丰实际成交价、目标转换价或产品回报。</p>
       </aside>
@@ -164,12 +191,12 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <div>
         <span class="section-kicker">CLEAR BY DESIGN</span>
         <h2 id="method-title">先看清数据，再做决定。</h2>
-        <p>当前报价来自 ExchangeRate-API；较长周期历史由 Frankfurter 的机构参考数据补齐。数据可能存在延迟，也不包含汇丰点差、费用、个性化利率或转换价。</p>
+        <p>公共市场价用于建立统一基准；Wise 通过官方 Rate API 接入；汇丰只接收安全采集并脱敏后的 Deposit Plus <code>exchangeSpotRate</code>。三者时间、口径和可获得性分别展示。</p>
       </div>
       <div class="method-grid">
-        <article><span>01</span><h3>不是银行报价</h3><p>页面只展示第三方市场参考价，交易前请以汇丰香港官方渠道为准。</p></article>
-        <article><span>02</span><h3>保留原始时间</h3><p>更新时间来自数据提供方，不使用访问页面的时间冒充行情时间。</p></article>
-        <article><span>03</span><h3>不做投资建议</h3><p>FXPulse 不预测收益、不推荐币种，也不代替产品文件或专业意见。</p></article>
+        <article><span>01</span><h3>同方向再比较</h3><p>切换或反转币种后，所有来源统一换算为“1 基准币种 = x 目标币种”。</p></article>
+        <article><span>02</span><h3>缺失就明确缺失</h3><p>没有官方凭据或最新采集时显示待接入/已过期，不使用其他来源冒充。</p></article>
+        <article><span>03</span><h3>报价不是建议</h3><p>FXPulse 不预测收益、不推荐币种，也不代替产品文件或专业意见。</p></article>
       </div>
     </section>
 
@@ -190,9 +217,26 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   </footer>
 
   <script id="fxpulse-data" type="application/json">${initialData}</script>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=${ASSET_VERSION}" defer></script>
 </body>
 </html>`;
+}
+
+function renderComparisonPlaceholders(base: CurrencyCode, quote: CurrencyCode): string {
+  return [
+    ["公共市场参考价", "market"],
+    ["Wise 中间价", "wise"],
+    ["汇丰 Deposit Plus", "hsbc_deposit_plus"],
+  ]
+    .map(
+      ([label, id]) => `<article class="source-card loading" data-source="${id}">
+        <div class="source-card-head"><span>${label}</span><b>连接中</b></div>
+        <strong>1 ${base} = — ${quote}</strong>
+        <p>正在确认该来源的报价状态</p>
+        <small>更新时间：—</small>
+      </article>`,
+    )
+    .join("");
 }
 
 function currencyOptions(selected: CurrencyCode): string {
@@ -240,29 +284,28 @@ function renderStructuredData(input: {
         url: input.origin,
         applicationCategory: "FinanceApplication",
         operatingSystem: "Web",
-        description: "多币种市场参考汇率与历史趋势工具",
+        description: "公共市场、Wise 与汇丰 Deposit Plus 多来源汇率比较及历史趋势工具",
         inLanguage: "zh-Hans",
         offers: { "@type": "Offer", price: "0", priceCurrency: "HKD" },
       },
       {
         "@type": "Dataset",
-        name: `${input.base}/${input.quote} 市场参考汇率`,
+        name: `${input.base}/${input.quote} 多来源汇率比较`,
         description: input.description,
         url: input.canonical,
         temporalCoverage: "P1Y",
         creator: { "@type": "Organization", name: "FXPulse" },
         isAccessibleForFree: true,
-        license: "https://www.exchangerate-api.com/terms",
       },
       {
         "@type": "FAQPage",
         mainEntity: [
           {
             "@type": "Question",
-            name: "FXPulse 显示的是汇丰香港实际报价吗？",
+            name: "FXPulse 的汇丰列是什么报价？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "不是。FXPulse 展示第三方市场参考汇率，实际交易价、利率及转换价请以汇丰香港官方渠道为准。",
+              text: "汇丰列只显示经安全采集的 Deposit Plus exchangeSpotRate，不等于 conversionRate、保证成交价或产品回报；实际交易以汇丰香港确认页面为准。",
             },
           },
           {
@@ -270,7 +313,7 @@ function renderStructuredData(input: {
             name: "汇率数据多久更新一次？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "页面保留并展示数据提供方的更新时间。FXPulse 的 Cloudflare 定时任务每 15 分钟检查并保存一次最新快照。",
+              text: "页面分别保留各提供方的更新时间。公共市场每 15 分钟检查归档；Wise 在有官方凭据时按需获取并每小时归档；汇丰取决于最近一次安全导入。",
             },
           },
         ],
@@ -302,7 +345,7 @@ export function renderSitemap(origin: string): string {
 
 export function renderLlmsTxt(origin: string): string {
   const defaultPair = defaultQuote("HKD");
-  return `# FXPulse\n\n> FXPulse is an independent exchange-rate reference tool for the 11 currencies available in HSBC Hong Kong Deposit Plus. It is not affiliated with HSBC.\n\n## What the site provides\n- Latest third-party market reference rates for AUD, CAD, CHF, CNY, EUR, GBP, HKD, JPY, NZD, SGD and USD.\n- Historical trend windows of 7, 15, 30, 90 and 365 days.\n- Amount conversion estimates and period high, low and change statistics.\n\n## Important interpretation\n- Values are reference rates, not HSBC quotes, bid/ask prices, Deposit Plus conversion rates or investment advice.\n- Source timestamps are shown on the page.\n- Deposit Plus is a structured investment product, not a time deposit, is not protected by Hong Kong's Deposit Protection Scheme and is not principal protected.\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n\n## Sources\n- Current reference rates: https://www.exchangerate-api.com/\n- Historical institutional reference rates: https://frankfurter.dev/\n- Deposit Plus product facts and risk disclosure: https://www.hsbc.com.hk/investments/products/structured/deposit-plus/\n`;
+  return `# FXPulse\n\n> FXPulse is an independent exchange-rate comparison tool for the 11 currencies available in HSBC Hong Kong Deposit Plus. It is not affiliated with HSBC or Wise.\n\n## What the site provides\n- Same-direction comparison of public market reference rates, Wise mid-market rates when official credentials are configured, and safely imported HSBC Deposit Plus exchangeSpotRate values.\n- Reversible directed pairs such as USD/AUD and AUD/USD.\n- A standalone amount calculator that does not change the unit rates below it.\n- Historical trend windows of 7, 15, 30, 90 and 365 days.\n\n## Important interpretation\n- A missing source is labelled unavailable or stale; FXPulse does not substitute another provider's value.\n- HSBC values are Deposit Plus spot reference rates, not conversion rates, guaranteed transaction rates or investment returns.\n- Source timestamps and provider status are shown separately.\n- Deposit Plus is a structured investment product, not a time deposit, is not protected by Hong Kong's Deposit Protection Scheme and is not principal protected.\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n- Data collection: https://github.com/wxywizard/FXPulse/blob/main/docs/DATA_COLLECTION.md\n\n## Sources\n- Public market reference rates: https://www.exchangerate-api.com/\n- Wise official Rate API: https://docs.wise.com/api-reference/rate/rateget\n- Historical institutional reference rates: https://frankfurter.dev/\n- Deposit Plus product facts and risk disclosure: https://www.hsbc.com.hk/investments/products/structured/deposit-plus/\n`;
 }
 
 function escapeScriptJson(value: string): string {
