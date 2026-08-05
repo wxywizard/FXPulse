@@ -12,7 +12,7 @@ FXPulse 是一个面向汇丰香港 Deposit Plus 关注者的多币种汇率观�
 - Cloudflare Vite Plugin + TypeScript + 原生 DOM
 - Vitest
 
-完整产品需求见 [`docs/PRD.md`](docs/PRD.md)，技术设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+完整产品需求见 [`docs/PRD.md`](docs/PRD.md)，技术设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，首次上线、域名配置、验证和回滚见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ## 本地开发
 
@@ -33,6 +33,8 @@ npm run check
 该命令依次执行 TypeScript 类型检查、单元测试和 Cloudflare Worker dry-run 构建。
 
 ## 部署到 Cloudflare
+
+完整操作请参考 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 先创建 D1 数据库：
 
