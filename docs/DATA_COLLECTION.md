@@ -1,232 +1,119 @@
 # FXPulse 数据采集方案
 
-版本：v1.1<br>
+版本：v1.2<br>
 更新时间：2026-08-05
 
-## 1. 采集目标
+## 1. 三项数据口径
 
-FXPulse 对同一币种方向并列展示三种口径：
-
-| 来源 | 页面名称 | 比较字段 | 自动化方式 |
+| 来源 | 页面名称 | 当前价获取方式 | 归档频率 |
 |---|---|---|---|
-| 公共市场 | 公共市场参考价 | 第三方参考汇率 | Worker 自动获取，每 15 分钟归档 |
-| Wise | Wise 中间价 | Wise Rate API 的 `rate` | 官方合作方 API，有凭据时按需获取、每小时归档 |
-| 汇丰香港 | Deposit Plus 现货参考价 | 报价返回的 `exchangeSpotRate` | 用户自有设备采集后，通过脱敏导入接口上传 |
+| 公共市场 | 公共市场参考价 | ExchangeRate-API 的 USD 锚定公开快照 | 每 15 分钟 |
+| Wise | Wise 公开中间价 | `wise.com/rates/live` 当前币种对 | 每小时保存 USD 双向报价 |
+| 汇丰香港 | 汇丰公开牌价（TT） | 香港官网公开 `exchange-rate` JSON 中的 TT Buy / TT Sell | 每 15 分钟保存 110 个有向币种对 |
 
-三者不可以互相替代。某一来源不可用时，页面显示“待接入”或“需更新”，不使用公共市场价伪装成 Wise 或汇丰报价。
+三项来源均自动采集，不需要账号、Token、Cookie 或用户手工导入。任一来源失败时只回退到它自己的 D1 归档，不允许用另一项汇率冒充。
 
-## 2. 统一方向
+## 2. 公共市场参考价
 
-所有比较统一为：
-
-```text
-1 BASE = rate QUOTE
-```
-
-例如：
+Worker 固定读取同一份 USD 基准数据，再计算交叉汇率：
 
 ```text
-AUD/USD：1 AUD = 0.7044 USD
-USD/AUD：1 USD = 1 / 0.7044 = 1.419648 AUD
+rate(BASE → QUOTE) = USD→QUOTE / USD→BASE
 ```
 
-数据库只需保存采集时的原始方向。读取反向币种对时由服务端取倒数，并保留原始采集时间和来源。
+同一快照下的 `USD/AUD` 与 `AUD/USD` 严格互为倒数。该数据是市场参考价，不是银行成交价。
 
-## 3. D1 数据模型
+## 3. Wise 公开中间价
 
-公共市场历史继续保存在 `rate_snapshots`。Wise 与汇丰按来源、币种对和采集时间保存在：
-
-```sql
-provider_rate_snapshots(
-  provider,
-  base,
-  quote,
-  rate,
-  rate_type,
-  observed_at,
-  source_updated_at,
-  metadata_json
-)
-```
-
-应用迁移：
-
-```bash
-npm run db:migrate:remote
-```
-
-也可以在 Cloudflare D1 Console 执行 [`migrations/0002_create_provider_rate_snapshots.sql`](../migrations/0002_create_provider_rate_snapshots.sql)。
-
-## 4. 公共市场参考价
-
-- 当前适配器：ExchangeRate-API 开放端点。
-- 页面和 Cron 都读取同一份 USD 基准快照，再计算交叉汇率；每 15 分钟检查并归档。
-- 正向和反向币种对来自同一快照，避免提供方不同基准请求造成舍入偏差。
-- 注意：开放端点通常不是逐笔实时价，页面只称“公共市场参考价”。
-- 历史冷启动：Frankfurter 日频机构参考数据。
-
-该来源是三源差异百分比的计算基准：
-
-```text
-差异百分比 = (来源汇率 - 公共市场汇率) / 公共市场汇率 × 100%
-```
-
-## 5. Wise 官方数据
-
-FXPulse 使用 Wise 官方 Rate API：
+请求示例：
 
 ```http
-GET https://api.wise.com/v1/rates?source=AUD&target=USD
-Authorization: Bearer <WISE_API_TOKEN>
+GET https://wise.com/rates/live?source=AUD&target=USD
+Accept: application/json
 ```
 
-Wise 官方文档明确要求 Bearer 或 Affiliate Basic Authentication。生产环境应申请 Wise Platform/Affiliate 合作方凭据，不要把个人 Wise 账户的高权限 Token 直接放入公共项目。
+响应示例：
 
-Cloudflare Secret 名称：
-
-```text
-WISE_API_TOKEN
+```json
+{
+  "source": "AUD",
+  "target": "USD",
+  "value": 0.70435,
+  "time": 1785914423771
+}
 ```
 
-CLI 配置：
+页面访问时按当前方向请求。该接口来自 Wise 公开货币转换器，属于公开网页能力而非带 SLA 的 Wise Platform 合作方 API，因此必须保留来源时间和失败降级状态。
 
-```bash
-npx wrangler secret put WISE_API_TOKEN
-```
+## 4. 汇丰香港公开牌价
 
-Dashboard 配置：
-
-```text
-Workers & Pages → fxpulse → Settings → Variables and Secrets
-→ Add → Secret → WISE_API_TOKEN
-```
-
-行为：
-
-- 用户打开币种对时，`/api/compare` 按需获取该 Wise 报价。
-- 每小时整点采集 10 个 `USD → 目标币种` 报价，作为故障降级归档。
-- Wise 临时不可用时优先返回最近归档，并标记“需更新”。
-- 未配置凭据时显示“待接入”，不会调用非公开网页接口或抓取 Wise 页面。
-
-官方参考：[Wise Rate API](https://docs.wise.com/api-reference/rate/rateget)、[Wise Affiliate live rates](https://docs.wise.com/guides/product/send-money/use-cases/affiliates)
-
-## 6. 汇丰 Deposit Plus 数据
-
-登录后的产品报价服务为：
+公开牌价接口：
 
 ```http
-POST https://investments3.personal-banking.hsbc.com.hk/shp/wealth-mobile-sifi-shp-api-hk-hbap-prod-proxy/v0/aws/sp/dcd/quote
+GET https://rbwm-api.hsbc.com.hk/digital-pws-tools-investments-eapi-prod-proxy/v1/investments/exchange-rate?locale=zh_HK
+Accept: application/json
 ```
 
-该接口依赖客户登录会话（例如 `dspSession`），不属于适合公共 Worker 长期匿名调用的公开 API。FXPulse 不保存、转发或刷新汇丰登录会话，也不自动登录用户账户。
+每个外币返回：
 
-### 6.1 安全导入通道
+- `ttBuyRt`：汇丰买入该外币、向客户支付的 HKD 牌价；
+- `ttSelRt`：汇丰卖出该外币、向客户收取的 HKD 牌价；
+- `lastUpdateDate`：汇丰原始更新时间；
+- `ccy`：币种代码。
 
-先生成一个只用于 FXPulse 采集的独立随机 Token：
-
-```bash
-openssl rand -hex 32
-```
-
-把结果保存为 Cloudflare Secret：
-
-```bash
-npx wrangler secret put HSBC_INGEST_TOKEN
-```
-
-或在 Dashboard 中添加 Secret：
+FXPulse 的方向语义始终是“客户卖出 BASE，买入 QUOTE”：
 
 ```text
-HSBC_INGEST_TOKEN
+BASE 外币 → HKD：BASE.ttBuyRt
+HKD → QUOTE 外币：1 / QUOTE.ttSelRt
+BASE 外币 → QUOTE 外币：BASE.ttBuyRt / QUOTE.ttSelRt
 ```
 
-导入接口：
+以接口中的示例牌价说明：
 
-```http
-POST /api/ingest/hsbc
-Authorization: Bearer <HSBC_INGEST_TOKEN>
-Content-Type: application/json
+```text
+USD TT Buy = 7.81110 HKD
+USD TT Sell = 7.87570 HKD
+AUD TT Buy = 5.48660 HKD
+AUD TT Sell = 5.56470 HKD
+
+USD/AUD = 7.81110 / 5.56470
+AUD/USD = 5.48660 / 7.87570
 ```
 
-AUD/USD 示例：
+两个方向不会互为倒数，这是银行买卖价差的结果，不是计算错误。
+
+## 5. 与 Deposit Plus 的边界
+
+汇丰公开牌价可匿名、自动、稳定地用于比较，但它不等于：
+
+- Deposit Plus 登录后的 `exchangeSpotRate`；
+- `conversionRate` 或盈亏平衡汇率；
+- 具体金额、期限、客户等级对应的产品利率；
+- 保证成交价或投资回报。
+
+FXPulse 页面必须明确标注“汇丰公开牌价（TT）”。在没有授权产品报价前，不再展示空白的“Deposit Plus 实时价”卡片，也不使用公共市场价冒充。
+
+## 6. D1 与降级
+
+`provider_rate_snapshots` 保存来源、方向、报价类型、采集时间、来源更新时间和计算口径。读取规则：
+
+- Wise：优先同方向归档；必要时可读取反方向并取倒数；
+- 汇丰：只能读取完全相同方向的归档，禁止取倒数；
+- 实时请求成功显示“实时”；
+- 实时请求失败但有归档显示“归档”；
+- 两者都没有显示“暂不可用”。
+
+## 7. 验证
 
 ```bash
-curl -X POST "https://fxpulse.177.best/api/ingest/hsbc" \
-  -H "Authorization: Bearer <HSBC_INGEST_TOKEN>" \
-  -H "Content-Type: application/json" \
-  --data '{
-    "base": "AUD",
-    "quote": "USD",
-    "exchangeSpotRate": 0.7044,
-    "capturedAt": "2026-08-05T12:30:00+08:00",
-    "conversionRate": 0.7010,
-    "interestRate": 6.5,
-    "depositPeriod": "1W",
-    "currencyPairSymbolText": "AUD/USD"
-  }'
-```
-
-服务端只允许保存以下白名单字段：
-
-- `base`
-- `quote`
-- `exchangeSpotRate`
-- `capturedAt`
-- `exchangeBreakEvenRate`
-- `conversionRate`
-- `interestRate`
-- `depositPeriod`
-- `currencyPairSymbolText`
-
-即使请求中误带 `dspSession`、Cookie、账户号或其他字段，也会被丢弃。更安全的做法仍然是在本地先删除所有会话头和账户数据，只上传白名单 JSON。
-
-### 6.2 后续本地采集器
-
-下一阶段可在用户自有 Mac 上运行本地采集器：
-
-1. 用户自行登录汇丰官方 App/网站。
-2. 本地代理仅识别 `/aws/sp/dcd/quote` 的返回。
-3. 在本机提取白名单字段并立即删除原始响应。
-4. 使用独立 `HSBC_INGEST_TOKEN` 上传到 FXPulse。
-5. 不上传请求头、Cookie、`dspSession`、账户资料或完整交易响应。
-
-该采集器必须是用户主动运行的本地工具，不能在 Cloudflare Worker 中模拟客户登录。
-
-## 7. 报价状态与保留策略
-
-| 状态 | 规则 | 页面表现 |
-|---|---|---|
-| 可用 | Wise/汇丰更新时间不超过 15 分钟 | 绿色“可用” |
-| 需更新 | 有归档，但更新时间超过 15 分钟 | 黄色“需更新”，仍显示时间 |
-| 待接入 | 没有凭据、没有导入或没有归档 | 不展示数字，说明原因 |
-
-- 所有来源保留原始 `source_updated_at`，不使用页面访问时间冒充报价时间。
-- 快照保留 400 天，Cron 自动清理更早数据。
-- 公共市场、Wise 和汇丰错误分别记录，不因单一来源失败而伪造其他来源。
-
-## 8. 验证
-
-查看三源比较：
-
-```bash
+curl "https://fxpulse.177.best/api/compare?base=USD&quote=AUD"
 curl "https://fxpulse.177.best/api/compare?base=AUD&quote=USD"
 ```
 
-检查最新归档：
+验收要点：
 
-```sql
-SELECT provider, base, quote, rate,
-       datetime(source_updated_at, 'unixepoch') AS source_updated_utc
-FROM provider_rate_snapshots
-ORDER BY source_updated_at DESC
-LIMIT 20;
-```
-
-页面方向反转验证：
-
-```text
-https://fxpulse.177.best/rates/aud/usd
-https://fxpulse.177.best/rates/usd/aud
-```
-
-两页汇率应互为倒数，来源和采集时间应一致。
+- 两个响应均包含 `market`、`wise`、`hsbc_public`；
+- Wise 与汇丰无需配置 Secret 即可返回数字；
+- 汇丰返回 `basis`，说明使用的 TT 计算口径；
+- 反转页面、计算器、三源对比、走势图和 canonical URL 同步切换。

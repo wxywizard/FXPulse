@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "FXPulse — HSBC Hong Kong Deposit Plus currency reference rates and trends.",
+  "description": "FXPulse — public market, Wise and HSBC Hong Kong exchange-rate comparison.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { isCurrencyCode, isHistoryWindow, normalizeCurrency } from "../src/currencies";
 import { deriveCrossRate, fetchCurrentSnapshot, fetchReferenceHistory } from "../src/rates";
 import {
+  deriveHsbcPublicPair,
   fetchWisePair,
-  parseHsbcDepositPlusInput,
   percentDifference,
 } from "../src/provider-rates";
 import { renderPage, renderSitemap } from "../src/template";
@@ -78,40 +78,67 @@ describe("provider adapters", () => {
     expect(history.points[1]?.rate).toBe(0.128);
   });
 
-  it("normalizes an authenticated Wise pair response", async () => {
+  it("normalizes the anonymous Wise public pair response", async () => {
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer wise-test-token");
-      return Response.json([
-        { source: "AUD", target: "USD", rate: 0.7041, time: "2026-08-04T12:30:00+0000" },
-      ]);
+      expect(String(_input)).toContain("wise.com/rates/live?source=AUD&target=USD");
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
+      return Response.json({
+        source: "AUD",
+        target: "USD",
+        value: 0.70435,
+        time: 1_785_914_423_771,
+      });
     };
-    const quote = await fetchWisePair("AUD", "USD", "wise-test-token", fetcher as typeof fetch);
+    const quote = await fetchWisePair("AUD", "USD", fetcher as typeof fetch);
     expect(quote.provider).toBe("wise");
     expect(quote.rateType).toBe("mid_market");
-    expect(quote.rate).toBe(0.7041);
-    expect(quote.sourceUpdatedAt).toBe(1_785_846_600);
+    expect(quote.rate).toBe(0.70435);
+    expect(quote.sourceUpdatedAt).toBe(1_785_914_423);
   });
 
-  it("accepts only whitelisted HSBC Deposit Plus quote fields", () => {
-    const quote = parseHsbcDepositPlusInput(
-      {
-        base: "aud",
-        quote: "usd",
-        exchangeSpotRate: 0.7044,
-        conversionRate: 0.701,
-        interestRate: 6.5,
-        depositPeriod: "1W",
-        dspSession: "must-not-be-stored",
-        accountNumber: "must-not-be-stored",
-      },
-      1_785_888_000,
+  it("derives directional HSBC TT cross-rates through HKD", () => {
+    const payload = {
+      detailRates: [
+        {
+          lastUpdateDate: "2026-08-05 15:14:42 +0800",
+          ccy: "USD",
+          ttBuyRt: "7.81110",
+          ttSelRt: "7.87570",
+        },
+        {
+          lastUpdateDate: "2026-08-05 15:14:42 +0800",
+          ccy: "AUD",
+          ttBuyRt: "5.48660",
+          ttSelRt: "5.56470",
+        },
+      ],
+    };
+    const usdAud = deriveHsbcPublicPair(payload, "USD", "AUD", 1_785_915_000);
+    const audUsd = deriveHsbcPublicPair(payload, "AUD", "USD", 1_785_915_000);
+    expect(usdAud.provider).toBe("hsbc_public");
+    expect(usdAud.rateType).toBe("public_tt_rate");
+    expect(usdAud.rate).toBeCloseTo(7.8111 / 5.5647, 10);
+    expect(audUsd.rate).toBeCloseTo(5.4866 / 7.8757, 10);
+    expect(usdAud.rate * audUsd.rate).toBeLessThan(1);
+    expect(usdAud.metadata.calculation).toBe("USD TT Buy ÷ AUD TT Sell");
+    expect(usdAud.sourceUpdatedAt).toBe(
+      Math.floor(Date.parse("2026-08-05T15:14:42+08:00") / 1000),
     );
-    expect(quote.base).toBe("AUD");
-    expect(quote.quote).toBe("USD");
-    expect(quote.rate).toBe(0.7044);
-    expect(quote.metadata).toEqual({ conversionRate: 0.701, interestRate: 6.5, depositPeriod: "1W" });
-    expect(quote.metadata).not.toHaveProperty("dspSession");
-    expect(quote.metadata).not.toHaveProperty("accountNumber");
+  });
+
+  it("uses the correct HSBC TT side when HKD is one leg", () => {
+    const payload = {
+      detailRates: [
+        {
+          lastUpdateDate: "2026-08-05 15:14:42 +0800",
+          ccy: "AUD",
+          ttBuyRt: "5.48660",
+          ttSelRt: "5.56470",
+        },
+      ],
+    };
+    expect(deriveHsbcPublicPair(payload, "AUD", "HKD").rate).toBe(5.4866);
+    expect(deriveHsbcPublicPair(payload, "HKD", "AUD").rate).toBeCloseTo(1 / 5.5647, 10);
   });
 
   it("calculates provider differences against one market direction", () => {
@@ -152,7 +179,8 @@ describe("search surfaces", () => {
     expect(html).toContain('id="swap-pair"');
     expect(html).toContain('id="comparison-grid"');
     expect(html).toContain('data-source="wise"');
-    expect(html).toContain('data-source="hsbc_deposit_plus"');
+    expect(html).toContain('data-source="hsbc_public"');
     expect(html).toContain("金额只用于本计算器");
+    expect(html).toContain("汇丰公开牌价（TT）");
   });
 });

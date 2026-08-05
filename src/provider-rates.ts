@@ -1,9 +1,11 @@
-import { CURRENCY_CODES, isCurrencyCode, normalizeCurrency, type CurrencyCode } from "./currencies";
+import { CURRENCY_CODES, type CurrencyCode } from "./currencies";
 
-const WISE_RATES_ENDPOINT = "https://api.wise.com/v1/rates";
+const WISE_PUBLIC_RATES_ENDPOINT = "https://wise.com/rates/live";
+const HSBC_PUBLIC_RATES_ENDPOINT =
+  "https://rbwm-api.hsbc.com.hk/digital-pws-tools-investments-eapi-prod-proxy/v1/investments/exchange-rate";
 
-export type ProviderId = "wise" | "hsbc_deposit_plus";
-export type ProviderRateType = "mid_market" | "deposit_plus_spot";
+export type ProviderId = "wise" | "hsbc_public";
+export type ProviderRateType = "mid_market" | "public_tt_rate";
 
 export interface ProviderRateQuote {
   provider: ProviderId;
@@ -27,23 +29,25 @@ interface ProviderRateRow {
   metadata_json: string;
 }
 
-interface WiseRateResponse {
-  rate: number;
+interface WisePublicRateResponse {
   source: string;
   target: string;
-  time: string;
+  value: number;
+  time: number;
 }
 
-export interface HsbcDepositPlusInput {
-  base: CurrencyCode;
-  quote: CurrencyCode;
-  exchangeSpotRate: number;
-  capturedAt?: string | number;
-  exchangeBreakEvenRate?: number;
-  conversionRate?: number;
-  interestRate?: number;
-  depositPeriod?: string;
-  currencyPairSymbolText?: string;
+export interface HsbcPublicRateDetail {
+  lastUpdateDate: string;
+  ccy: string;
+  ttBuyRt: string;
+  ttSelRt: string;
+  bankBuyRt?: string;
+  bankSellRt?: string;
+  ccyName?: string;
+}
+
+export interface HsbcPublicRateResponse {
+  detailRates: HsbcPublicRateDetail[];
 }
 
 function isPositiveFinite(value: unknown): value is number {
@@ -53,52 +57,119 @@ function isPositiveFinite(value: unknown): value is number {
 export async function fetchWisePair(
   base: CurrencyCode,
   quote: CurrencyCode,
-  token: string,
   fetcher: typeof fetch = fetch,
 ): Promise<ProviderRateQuote> {
   const query = new URLSearchParams({ source: base, target: quote });
-  const response = await fetcher(`${WISE_RATES_ENDPOINT}?${query.toString()}`, {
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${token}`,
-    },
+  const response = await fetcher(`${WISE_PUBLIC_RATES_ENDPOINT}?${query.toString()}`, {
+    headers: { accept: "application/json" },
+    cf: { cacheEverything: true, cacheTtl: 60 },
   });
 
-  if (!response.ok) throw new Error(`Wise rate provider returned ${response.status}`);
-  const payload = (await response.json()) as WiseRateResponse[];
-  if (!Array.isArray(payload)) throw new Error("Wise rate provider returned an invalid payload");
-
-  const item = payload.find(
-    (row) => row.source?.toUpperCase() === base && row.target?.toUpperCase() === quote,
-  );
-  if (!item || !isPositiveFinite(item.rate)) {
-    throw new Error(`Wise rate provider omitted ${base}/${quote}`);
+  if (!response.ok) throw new Error(`Wise public rate provider returned ${response.status}`);
+  const item = (await response.json()) as WisePublicRateResponse;
+  if (
+    item?.source?.toUpperCase() !== base ||
+    item?.target?.toUpperCase() !== quote ||
+    !isPositiveFinite(item.value)
+  ) {
+    throw new Error(`Wise public rate provider omitted ${base}/${quote}`);
   }
 
   const nowEpoch = Math.floor(Date.now() / 1000);
-  const parsedTimestamp = Math.floor(Date.parse(item.time) / 1000);
+  const sourceUpdatedAt = normalizeEpoch(item.time, nowEpoch);
   return {
     provider: "wise",
     base,
     quote,
-    rate: item.rate,
+    rate: item.value,
     rateType: "mid_market",
     observedAt: nowEpoch,
-    sourceUpdatedAt: Number.isFinite(parsedTimestamp) ? parsedTimestamp : nowEpoch,
-    metadata: {},
+    sourceUpdatedAt,
+    metadata: { calculation: "Wise 公开货币转换器中间价" },
+  };
+}
+
+export async function fetchHsbcPublicPair(
+  base: CurrencyCode,
+  quote: CurrencyCode,
+  fetcher: typeof fetch = fetch,
+): Promise<ProviderRateQuote> {
+  const response = await fetcher(`${HSBC_PUBLIC_RATES_ENDPOINT}?locale=zh_HK`, {
+    headers: { accept: "application/json" },
+    cf: { cacheEverything: true, cacheTtl: 300 },
+  });
+  if (!response.ok) throw new Error(`HSBC public rate provider returned ${response.status}`);
+  const payload = (await response.json()) as HsbcPublicRateResponse;
+  return deriveHsbcPublicPair(payload, base, quote);
+}
+
+export function deriveHsbcPublicPair(
+  payload: HsbcPublicRateResponse,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+  nowEpoch = Math.floor(Date.now() / 1000),
+): ProviderRateQuote {
+  if (!Array.isArray(payload?.detailRates)) {
+    throw new Error("HSBC public rate provider returned an invalid payload");
+  }
+  if (base === quote) throw new Error("Base and quote must be different");
+
+  const details = new Map(
+    payload.detailRates.map((detail) => [detail.ccy?.toUpperCase(), detail] as const),
+  );
+  const baseDetail = base === "HKD" ? null : details.get(base);
+  const quoteDetail = quote === "HKD" ? null : details.get(quote);
+  const baseTtBuyHkd = base === "HKD" ? 1 : parsePositiveRate(baseDetail?.ttBuyRt, base);
+  const quoteTtSellHkd = quote === "HKD" ? 1 : parsePositiveRate(quoteDetail?.ttSelRt, quote);
+  const timestamps = [baseDetail, quoteDetail]
+    .filter((detail): detail is HsbcPublicRateDetail => Boolean(detail))
+    .map((detail) => parseHsbcTimestamp(detail.lastUpdateDate))
+    .filter((timestamp): timestamp is number => timestamp !== null);
+  const sourceUpdatedAt = timestamps.length ? Math.min(...timestamps) : nowEpoch;
+
+  return {
+    provider: "hsbc_public",
+    base,
+    quote,
+    rate: baseTtBuyHkd / quoteTtSellHkd,
+    rateType: "public_tt_rate",
+    observedAt: nowEpoch,
+    sourceUpdatedAt,
+    metadata: {
+      baseTtBuyHkd,
+      quoteTtSellHkd,
+      calculation: hsbcCalculationLabel(base, quote),
+      priceSide: "客户卖出基准币种并买入目标币种",
+    },
   };
 }
 
 export async function collectWiseUsdQuotes(
-  token: string,
   fetcher: typeof fetch = fetch,
 ): Promise<ProviderRateQuote[]> {
   const results = await Promise.allSettled(
-    CURRENCY_CODES.filter((quote) => quote !== "USD").map((quote) =>
-      fetchWisePair("USD", quote, token, fetcher),
-    ),
+    CURRENCY_CODES.filter((currency) => currency !== "USD").flatMap((currency) => [
+      fetchWisePair("USD", currency, fetcher),
+      fetchWisePair(currency, "USD", fetcher),
+    ]),
   );
   return results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+}
+
+export async function collectHsbcPublicQuotes(
+  fetcher: typeof fetch = fetch,
+): Promise<ProviderRateQuote[]> {
+  const response = await fetcher(`${HSBC_PUBLIC_RATES_ENDPOINT}?locale=zh_HK`, {
+    headers: { accept: "application/json" },
+    cf: { cacheEverything: true, cacheTtl: 300 },
+  });
+  if (!response.ok) throw new Error(`HSBC public rate provider returned ${response.status}`);
+  const payload = (await response.json()) as HsbcPublicRateResponse;
+  return CURRENCY_CODES.flatMap((base) =>
+    CURRENCY_CODES.filter((quote) => quote !== base).map((quote) =>
+      deriveHsbcPublicPair(payload, base, quote),
+    ),
+  );
 }
 
 export async function storeProviderQuote(
@@ -156,83 +227,14 @@ export async function readLatestProviderQuote(
   base: CurrencyCode,
   quote: CurrencyCode,
 ): Promise<ProviderRateQuote | null> {
-  const row = await db
-    .prepare(
-      `SELECT provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json
-       FROM provider_rate_snapshots
-       WHERE provider = ?1
-         AND ((base = ?2 AND quote = ?3) OR (base = ?3 AND quote = ?2))
-       ORDER BY source_updated_at DESC, observed_at DESC
-       LIMIT 1`,
-    )
-    .bind(provider, base, quote)
-    .first<ProviderRateRow>();
+  const direct = await readProviderRow(db, provider, base, quote);
+  if (direct) return rowToQuote(direct, base, quote, false);
 
-  if (!row || !isPositiveFinite(row.rate)) return null;
-  const isDirect = row.base === base && row.quote === quote;
-  return {
-    provider: row.provider,
-    base,
-    quote,
-    rate: isDirect ? row.rate : 1 / row.rate,
-    rateType: row.rate_type,
-    observedAt: row.observed_at,
-    sourceUpdatedAt: row.source_updated_at,
-    metadata: parseMetadata(row.metadata_json),
-  };
-}
-
-export function parseHsbcDepositPlusInput(
-  value: unknown,
-  nowEpoch = Math.floor(Date.now() / 1000),
-): ProviderRateQuote {
-  if (!value || typeof value !== "object") throw new Error("Invalid JSON payload");
-  const input = value as Record<string, unknown>;
-  const rawBase = typeof input.base === "string" ? input.base : null;
-  const rawQuote = typeof input.quote === "string" ? input.quote : null;
-  if (!isCurrencyCode(rawBase) || !isCurrencyCode(rawQuote)) {
-    throw new Error("Unsupported currency pair");
-  }
-  const base = normalizeCurrency(rawBase);
-  const quote = normalizeCurrency(rawQuote);
-  if (base === quote) throw new Error("Base and quote must be different");
-  if (!isPositiveFinite(input.exchangeSpotRate)) {
-    throw new Error("exchangeSpotRate must be a positive number");
-  }
-
-  const capturedAt = parseCapturedAt(input.capturedAt, nowEpoch);
-  if (capturedAt > nowEpoch + 600 || capturedAt < nowEpoch - 7 * 86_400) {
-    throw new Error("capturedAt must be within the last 7 days");
-  }
-
-  const metadata: ProviderRateQuote["metadata"] = {};
-  for (const field of ["exchangeBreakEvenRate", "conversionRate", "interestRate"] as const) {
-    const fieldValue = input[field];
-    if (fieldValue !== undefined) {
-      if (!isPositiveFinite(fieldValue)) throw new Error(`${field} must be a positive number`);
-      metadata[field] = fieldValue;
-    }
-  }
-  for (const field of ["depositPeriod", "currencyPairSymbolText"] as const) {
-    const fieldValue = input[field];
-    if (fieldValue !== undefined) {
-      if (typeof fieldValue !== "string" || fieldValue.length > 80) {
-        throw new Error(`${field} must be a short string`);
-      }
-      metadata[field] = fieldValue;
-    }
-  }
-
-  return {
-    provider: "hsbc_deposit_plus",
-    base,
-    quote,
-    rate: input.exchangeSpotRate,
-    rateType: "deposit_plus_spot",
-    observedAt: nowEpoch,
-    sourceUpdatedAt: capturedAt,
-    metadata,
-  };
+  // A Wise mid-market rate can safely use the inverse as an archive fallback.
+  // HSBC TT buy/sell rates are directional and must never be inverted.
+  if (provider !== "wise") return null;
+  const reverse = await readProviderRow(db, provider, quote, base);
+  return reverse ? rowToQuote(reverse, base, quote, true) : null;
 }
 
 export function percentDifference(rate: number | null, marketRate: number): number | null {
@@ -240,16 +242,67 @@ export function percentDifference(rate: number | null, marketRate: number): numb
   return ((rate - marketRate) / marketRate) * 100;
 }
 
-function parseCapturedAt(value: unknown, fallback: number): number {
-  if (value === undefined || value === null || value === "") return fallback;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 10_000_000_000 ? Math.floor(value / 1000) : Math.floor(value);
-  }
-  if (typeof value === "string") {
-    const parsed = Math.floor(Date.parse(value) / 1000);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  throw new Error("capturedAt must be an ISO timestamp or Unix timestamp");
+async function readProviderRow(
+  db: D1Database,
+  provider: ProviderId,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+): Promise<ProviderRateRow | null> {
+  return db
+    .prepare(
+      `SELECT provider, base, quote, rate, rate_type, observed_at, source_updated_at, metadata_json
+       FROM provider_rate_snapshots
+       WHERE provider = ?1 AND base = ?2 AND quote = ?3
+       ORDER BY source_updated_at DESC, observed_at DESC
+       LIMIT 1`,
+    )
+    .bind(provider, base, quote)
+    .first<ProviderRateRow>();
+}
+
+function rowToQuote(
+  row: ProviderRateRow,
+  base: CurrencyCode,
+  quote: CurrencyCode,
+  invert: boolean,
+): ProviderRateQuote | null {
+  if (!isPositiveFinite(row.rate)) return null;
+  return {
+    provider: row.provider,
+    base,
+    quote,
+    rate: invert ? 1 / row.rate : row.rate,
+    rateType: row.rate_type,
+    observedAt: row.observed_at,
+    sourceUpdatedAt: row.source_updated_at,
+    metadata: parseMetadata(row.metadata_json),
+  };
+}
+
+function parsePositiveRate(value: string | undefined, currency: CurrencyCode): number {
+  const parsed = Number(value);
+  if (!isPositiveFinite(parsed)) throw new Error(`HSBC public rate omitted ${currency}`);
+  return parsed;
+}
+
+function parseHsbcTimestamp(value: string): number | null {
+  const match = value?.match(
+    /^(\d{4}-\d{2}-\d{2})\s(\d{2}:\d{2}:\d{2})\s([+-]\d{2})(\d{2})$/,
+  );
+  const normalized = match ? `${match[1]}T${match[2]}${match[3]}:${match[4]}` : value;
+  const parsed = Math.floor(Date.parse(normalized) / 1000);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeEpoch(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return value > 10_000_000_000 ? Math.floor(value / 1000) : Math.floor(value);
+}
+
+function hsbcCalculationLabel(base: CurrencyCode, quote: CurrencyCode): string {
+  if (base === "HKD") return `1 ÷ ${quote} TT Sell`;
+  if (quote === "HKD") return `${base} TT Buy`;
+  return `${base} TT Buy ÷ ${quote} TT Sell`;
 }
 
 function parseMetadata(value: string): ProviderRateQuote["metadata"] {

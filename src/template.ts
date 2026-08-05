@@ -7,7 +7,7 @@ import {
 } from "./currencies";
 import type { CurrentSnapshot } from "./rates";
 
-const ASSET_VERSION = "20260805-comparison-v1";
+const ASSET_VERSION = "20260805-live-sources-v2";
 
 interface PageOptions {
   origin: string;
@@ -22,7 +22,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
   const canonicalPath = `/rates/${base.toLowerCase()}/${quote.toLowerCase()}`;
   const canonical = `${origin}${canonicalPath}`;
   const title = `${base}/${quote} 汇率与历史走势｜FXPulse`;
-  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise 与汇丰 Deposit Plus 报价，并查看 7、15、30、90、365 天走势。`;
+  const description = `比较 ${baseMeta.name}（${base}）兑${quoteMeta.name}（${quote}）公共市场、Wise 公开中间价与汇丰香港公开 TT 牌价，并查看 7、15、30、90、365 天走势。`;
   const initialData = escapeScriptJson(
     JSON.stringify({ base, quote, snapshot, generatedAt: new Date().toISOString() }),
   );
@@ -81,7 +81,7 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
     <section class="hero" aria-labelledby="hero-title">
       <div class="eyebrow"><span>FX</span> 为香港外币用户而做</div>
       <h1 id="hero-title">外汇变化，<em>一眼看清。</em></h1>
-      <p>同一币种方向，对比公共市场、Wise 与汇丰 Deposit Plus 报价，再结合近期走势判断差异。</p>
+      <p>同一币种方向，对比公共市场、Wise 公开中间价与汇丰香港公开牌价，再结合近期走势判断差异。</p>
       <div class="hero-meta">
         <span><b id="status-dot" class="status-dot ${snapshot ? "" : "pending"}"></b><span id="data-status">${snapshot ? "数据源正常" : "正在连接数据源"}</span></span>
         <span>提供方更新：<time id="source-updated">${updatedText}</time> HKT</span>
@@ -191,11 +191,11 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <div>
         <span class="section-kicker">CLEAR BY DESIGN</span>
         <h2 id="method-title">先看清数据，再做决定。</h2>
-        <p>公共市场价用于建立统一基准；Wise 通过官方 Rate API 接入；汇丰只接收安全采集并脱敏后的 Deposit Plus <code>exchangeSpotRate</code>。三者时间、口径和可获得性分别展示。</p>
+        <p>公共市场价用于建立统一基准；Wise 读取其公开货币转换器中间价；汇丰读取香港官网公开的 TT Buy / TT Sell 牌价，并按兑换方向经 HKD 计算交叉汇率。</p>
       </div>
       <div class="method-grid">
         <article><span>01</span><h3>同方向再比较</h3><p>切换或反转币种后，所有来源统一换算为“1 基准币种 = x 目标币种”。</p></article>
-        <article><span>02</span><h3>缺失就明确缺失</h3><p>没有官方凭据或最新采集时显示待接入/已过期，不使用其他来源冒充。</p></article>
+        <article><span>02</span><h3>保留买卖价差</h3><p>汇丰正反向分别按 TT Buy 与 TT Sell 计算，不用简单倒数掩盖银行买卖价差。</p></article>
         <article><span>03</span><h3>报价不是建议</h3><p>FXPulse 不预测收益、不推荐币种，也不代替产品文件或专业意见。</p></article>
       </div>
     </section>
@@ -204,9 +204,9 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
       <span aria-hidden="true">!</span>
       <div>
         <h2>重要风险提示</h2>
-        <p>Deposit Plus 是涉及外汇期权的结构性投资产品，不是定期存款，不受香港存款保障计划保障，亦非保本产品。汇率波动可能抵销利息，并造成本金损失。</p>
+        <p>页面中的“汇丰公开牌价”是官网指示性 TT 牌价，不是登录后优惠价，也不是 Deposit Plus 的协定汇率、利率或保证成交价。实际交易以汇丰确认页面为准。</p>
       </div>
-      <a href="https://www.hsbc.com.hk/investments/products/structured/deposit-plus/" target="_blank" rel="noopener noreferrer">查看官方产品说明 <span aria-hidden="true">↗</span></a>
+      <a href="https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/" target="_blank" rel="noopener noreferrer">查看汇丰公开牌价 <span aria-hidden="true">↗</span></a>
     </section>
   </main>
 
@@ -225,8 +225,8 @@ export function renderPage({ origin, base, quote, snapshot }: PageOptions): stri
 function renderComparisonPlaceholders(base: CurrencyCode, quote: CurrencyCode): string {
   return [
     ["公共市场参考价", "market"],
-    ["Wise 中间价", "wise"],
-    ["汇丰 Deposit Plus", "hsbc_deposit_plus"],
+    ["Wise 公开中间价", "wise"],
+    ["汇丰公开牌价（TT）", "hsbc_public"],
   ]
     .map(
       ([label, id]) => `<article class="source-card loading" data-source="${id}">
@@ -284,7 +284,7 @@ function renderStructuredData(input: {
         url: input.origin,
         applicationCategory: "FinanceApplication",
         operatingSystem: "Web",
-        description: "公共市场、Wise 与汇丰 Deposit Plus 多来源汇率比较及历史趋势工具",
+        description: "公共市场、Wise 公开中间价与汇丰香港公开 TT 牌价比较及历史趋势工具",
         inLanguage: "zh-Hans",
         offers: { "@type": "Offer", price: "0", priceCurrency: "HKD" },
       },
@@ -305,7 +305,7 @@ function renderStructuredData(input: {
             name: "FXPulse 的汇丰列是什么报价？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "汇丰列只显示经安全采集的 Deposit Plus exchangeSpotRate，不等于 conversionRate、保证成交价或产品回报；实际交易以汇丰香港确认页面为准。",
+              text: "汇丰列显示香港官网公开 TT 牌价。客户卖出基准币种使用 TT Buy，买入目标币种使用 TT Sell；外币交叉盘经 HKD 计算。它不等于登录后优惠价、Deposit Plus 协定汇率或保证成交价。",
             },
           },
           {
@@ -313,7 +313,7 @@ function renderStructuredData(input: {
             name: "汇率数据多久更新一次？",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "页面分别保留各提供方的更新时间。公共市场每 15 分钟检查归档；Wise 在有官方凭据时按需获取并每小时归档；汇丰取决于最近一次安全导入。",
+              text: "页面访问时实时读取三项来源并显示各自更新时间；Cloudflare Cron 每 15 分钟归档公共市场与汇丰牌价，Wise 每小时归档一次作为故障降级。",
             },
           },
         ],
@@ -345,7 +345,7 @@ export function renderSitemap(origin: string): string {
 
 export function renderLlmsTxt(origin: string): string {
   const defaultPair = defaultQuote("HKD");
-  return `# FXPulse\n\n> FXPulse is an independent exchange-rate comparison tool for the 11 currencies available in HSBC Hong Kong Deposit Plus. It is not affiliated with HSBC or Wise.\n\n## What the site provides\n- Same-direction comparison of public market reference rates, Wise mid-market rates when official credentials are configured, and safely imported HSBC Deposit Plus exchangeSpotRate values.\n- Reversible directed pairs such as USD/AUD and AUD/USD.\n- A standalone amount calculator that does not change the unit rates below it.\n- Historical trend windows of 7, 15, 30, 90 and 365 days.\n\n## Important interpretation\n- A missing source is labelled unavailable or stale; FXPulse does not substitute another provider's value.\n- HSBC values are Deposit Plus spot reference rates, not conversion rates, guaranteed transaction rates or investment returns.\n- Source timestamps and provider status are shown separately.\n- Deposit Plus is a structured investment product, not a time deposit, is not protected by Hong Kong's Deposit Protection Scheme and is not principal protected.\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n- Data collection: https://github.com/wxywizard/FXPulse/blob/main/docs/DATA_COLLECTION.md\n\n## Sources\n- Public market reference rates: https://www.exchangerate-api.com/\n- Wise official Rate API: https://docs.wise.com/api-reference/rate/rateget\n- Historical institutional reference rates: https://frankfurter.dev/\n- Deposit Plus product facts and risk disclosure: https://www.hsbc.com.hk/investments/products/structured/deposit-plus/\n`;
+  return `# FXPulse\n\n> FXPulse is an independent exchange-rate comparison tool for the 11 currencies relevant to HSBC Hong Kong foreign-currency products. It is not affiliated with HSBC or Wise.\n\n## What the site provides\n- Same-direction comparison of a public market reference rate, Wise's public mid-market rate, and HSBC Hong Kong's public TT board rate.\n- Reversible directed pairs such as USD/AUD and AUD/USD, with HSBC bid/ask spread preserved in each direction.\n- A standalone amount calculator that does not change the unit rates below it.\n- Base and quote currency selectors plus 7, 15, 30, 90 and 365 day trend windows.\n\n## Important interpretation\n- HSBC cross-rates are calculated through HKD: the base leg uses TT Buy and the quote leg uses TT Sell.\n- HSBC public board rates are indicative and are not logged-in preferential rates, Deposit Plus terms, or guaranteed transaction prices.\n- Source timestamps and provider status are shown separately.\n\n## Key pages\n- Home: ${origin}/\n- Default pair: ${origin}/rates/hkd/${defaultPair.toLowerCase()}\n- Sitemap: ${origin}/sitemap.xml\n- Product requirements: https://github.com/wxywizard/FXPulse/blob/main/docs/PRD.md\n- Data collection: https://github.com/wxywizard/FXPulse/blob/main/docs/DATA_COLLECTION.md\n\n## Sources\n- Public market reference rates: https://www.exchangerate-api.com/\n- Wise public currency converter: https://wise.com/gb/currency-converter/\n- HSBC Hong Kong public currency rates: https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/\n- Historical institutional reference rates: https://frankfurter.dev/\n`;
 }
 
 function escapeScriptJson(value: string): string {

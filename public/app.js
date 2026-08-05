@@ -230,7 +230,7 @@ function renderComparison(payload) {
   elements.comparisonGrid.innerHTML = payload.sources
     .map((source) => {
       const available = typeof source.rate === "number" && Number.isFinite(source.rate);
-      const statusLabel = source.status === "available" ? "可用" : source.status === "stale" ? "需更新" : "待接入";
+      const statusLabel = source.status === "available" ? "实时" : source.status === "stale" ? "归档" : "暂不可用";
       const difference = typeof source.differenceFromMarketPct === "number"
         ? source.id === "market"
           ? "比较基准"
@@ -240,10 +240,17 @@ function renderComparison(payload) {
         ? `1 ${state.base} = ${formatRate(source.rate, state.quote)} ${state.quote}`
         : "暂无报价";
       const updated = source.sourceUpdatedAt ? formatSourceTime(source.sourceUpdatedAt) : "—";
+      const basis = source.basis
+        ? `<small class="source-basis">口径：${escapeHtml(source.basis)}</small>`
+        : "";
+      const fallback = available && source.reason
+        ? `<small class="source-warning">${escapeHtml(source.reason)}</small>`
+        : "";
       return `<article class="source-card source-${escapeHtml(source.id)} ${escapeHtml(source.status)}">
         <div class="source-card-head"><span>${escapeHtml(source.label)}</span><b>${statusLabel}</b></div>
         <strong>${rateText}</strong>
         <p>${escapeHtml(difference)}</p>
+        ${basis}${fallback}
         <small>更新时间：${escapeHtml(updated)}</small>
         <a href="${escapeHtml(source.providerUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.provider)} <span aria-hidden="true">↗</span></a>
       </article>`;

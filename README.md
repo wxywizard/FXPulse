@@ -1,6 +1,6 @@
 # FXPulse
 
-FXPulse 是一个面向汇丰香港 Deposit Plus 关注者的多币种汇率观察工具。它覆盖产品当前支持的 11 个币种，并按同一方向比较公共市场参考价、Wise 中间价与汇丰 Deposit Plus 现货参考价。
+FXPulse 是一个面向汇丰香港外币与 Deposit Plus 关注者的多币种汇率观察工具。它覆盖 11 个主要币种，并按同一兑换方向比较公共市场参考价、Wise 公开中间价与汇丰香港公开 TT 牌价。
 
 > FXPulse 不是汇丰网站，也不提供银行报价或投资建议。实际交易请以汇丰香港官方渠道和产品文件为准。
 
@@ -18,9 +18,10 @@ FXPulse 是一个面向汇丰香港 Deposit Plus 关注者的多币种汇率观�
 
 - `USD/AUD ↔ AUD/USD` 等任意支持币种对一键反转。
 - Wise 风格的双币种金额计算器；金额输入不改变下方“1 单位”汇率总览。
-- 公共市场、Wise、汇丰 Deposit Plus 三源对比与价差百分比。
-- Wise 官方 Rate API 可选接入，以及每小时 D1 归档。
-- 汇丰 App 报价的安全脱敏导入；不保存登录会话、Cookie 或账户资料。
+- 公共市场、Wise、汇丰公开牌价三源实时对比与价差百分比。
+- Wise 公开货币转换器汇率自动接入，无需 Token；每小时 D1 归档。
+- 汇丰香港官网匿名牌价接口自动接入；按 TT Buy / TT Sell 与兑换方向计算。
+- 汇丰正反方向分别报价，保留银行买卖价差，不把 `AUD/USD` 简单取倒数冒充 `USD/AUD`。
 - 7/15/30/90/365 天历史走势与 110 个可索引币种对页面。
 
 ## 本地开发
@@ -58,14 +59,15 @@ npm run db:migrate:remote
 npm run deploy
 ```
 
-Cron 已配置为每 15 分钟运行一次（UTC），定时保存 11 个币种相对 USD 的公共市场参考价快照；配置 Wise 官方凭据后，每小时保存一次 Wise 快照。
+Cron 已配置为每 15 分钟运行一次（UTC），保存公共市场与 110 个有方向的汇丰公开牌价快照；Wise 每小时保存 USD 与其余币种的双向快照。三项公开来源都不需要 Secret。
 
 ## 数据来源
 
 - 当前市场参考价：[ExchangeRate-API](https://www.exchangerate-api.com/)
 - 冷启动历史参考价：[Frankfurter](https://frankfurter.dev/)
-- Wise 中间价（需官方凭据）：[Wise Rate API](https://docs.wise.com/api-reference/rate/rateget)
-- 支持币种与产品风险说明：[HSBC Hong Kong Deposit Plus](https://www.hsbc.com.hk/investments/products/structured/deposit-plus/)
+- Wise 公开中间价：[Wise Currency Converter](https://wise.com/gb/currency-converter/)
+- 汇丰香港公开 TT 牌价：[HSBC Currency Exchange Rates](https://www.hsbc.com.hk/investments/products/foreign-exchange/currency-rate/)
+- 产品风险说明：[HSBC Hong Kong Deposit Plus](https://www.hsbc.com.hk/investments/products/structured/deposit-plus/)
 
 ## License
 
