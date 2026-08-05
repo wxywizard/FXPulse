@@ -8,7 +8,7 @@ import {
 import type { CurrentSnapshot } from "./rates";
 import { HONG_KONG_BANKS } from "./bank-rates";
 
-const ASSET_VERSION = "20260805-chart-source-limit-v1";
+const ASSET_VERSION = "20260805-free-tier-cache-v1";
 
 interface PageOptions {
   origin: string;

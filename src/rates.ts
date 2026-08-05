@@ -8,6 +8,7 @@ const CURRENT_RATES_ENDPOINT = "https://open.er-api.com/v6/latest";
 const HISTORY_RATES_ENDPOINT = "https://api.frankfurter.dev/v2/rates";
 const CURRENT_PROVIDER = "ExchangeRate-API";
 const HISTORY_PROVIDER = "Frankfurter institutional reference rates";
+const UPSTREAM_TIMEOUT_MS = 5_000;
 
 interface ExchangeRateApiResponse {
   result: string;
@@ -78,6 +79,7 @@ export async function fetchCurrentSnapshot(
   const response = await fetcher(`${CURRENT_RATES_ENDPOINT}/USD`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 300 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -128,6 +130,7 @@ export async function fetchReferenceHistory(
   const response = await fetcher(`${HISTORY_RATES_ENDPOINT}?${query.toString()}`, {
     headers: { accept: "application/json" },
     cf: { cacheEverything: true, cacheTtl: 3600 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -200,7 +203,7 @@ export async function readD1History(
     }
   }
 
-  if (points.length < 4) return null;
+  if (points.length < 2) return null;
   return {
     base,
     quote,
@@ -226,15 +229,32 @@ export async function storeSnapshot(db: D1Database, snapshot: CurrentSnapshot): 
       .bind(
         quote,
         snapshot.rates[quote],
-        snapshot.fetchedAt,
+        snapshot.sourceUpdatedAt,
         snapshot.sourceUpdatedAt,
         snapshot.provider,
       ),
   );
 
   await db.batch(statements);
-  const cutoff = snapshot.fetchedAt - 400 * 86_400;
-  await db.prepare("DELETE FROM rate_snapshots WHERE observed_at < ?1").bind(cutoff).run();
+}
+
+export async function cleanupMarketHistory(
+  db: D1Database,
+  nowEpoch = Math.floor(Date.now() / 1000),
+): Promise<void> {
+  const cutoff = nowEpoch - 400 * 86_400;
+  await db
+    .prepare(
+      `DELETE FROM rate_snapshots
+       WHERE rowid IN (
+         SELECT rowid FROM rate_snapshots
+         WHERE observed_at < ?1
+         ORDER BY observed_at ASC
+         LIMIT 1000
+       )`,
+    )
+    .bind(cutoff)
+    .run();
 }
 
 function isoDate(date: Date): string {
